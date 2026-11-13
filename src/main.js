@@ -4,10 +4,11 @@
 import * as THREE from 'three';
 import { HeliFDM, qRot } from './fdm.js';
 import { AFCS, MODES } from './afcs.js';
-import { Environment, DEFAULT_CFG, FIELD_ALT, DECK_H, SHIP, BUILDINGS } from './env.js';
+import { Environment, DEFAULT_CFG, DECK_H, SHIP, MISSIONS, terrainH, installDEM, buildings, fieldAlt } from './env.js';
+import { PAU_DEM, PAU_DEM_PNG } from './pau-dem.js';
 import { World } from './world.js';
 import { buildHeli, buildCockpit, tryLoadCustomModel, EYE } from './heli.js';
-import { drawPFD, drawND, drawENG, drawHOV } from './instruments.js';
+import { drawPFD, drawSITAC, drawENG, drawHOV, buildRelief } from './instruments.js';
 import { Input, FUNCS, BTNS } from './input.js';
 
 const D2R = Math.PI / 180, R2D = 180 / Math.PI, KT = 1.94384, FT = 3.28084, NM = 1852, H = 1 / 240;
@@ -29,6 +30,15 @@ addEventListener('resize', resize); resize();
 
 // ---------------------------------------------------------------- simulation
 let cfg = { ...DEFAULT_CFG, start: 'pad', mode: 'ATT' };
+// relief réel des Pyrénées : décodage de l'image d'altitude embarquée
+const demReady = (async () => {
+  const im = new Image(); im.src = PAU_DEM_PNG; await im.decode();
+  const c = Object.assign(document.createElement('canvas'), { width: PAU_DEM.nx, height: PAU_DEM.ny }), g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(im, 0, 0); const d = g.getImageData(0, 0, PAU_DEM.nx, PAU_DEM.ny).data, h = new Float32Array(PAU_DEM.nx * PAU_DEM.ny);
+  for (let r = 0; r < PAU_DEM.ny; r++) for (let i = 0; i < PAU_DEM.nx; i++) { const o = (r * PAU_DEM.nx + i) * 4; h[(PAU_DEM.ny - 1 - r) * PAU_DEM.nx + i] = (d[o] * 256 + d[o + 1]) / 4; }
+  installDEM(PAU_DEM, h);
+})();
+const relief = {};
 let env = new Environment(cfg);
 const fdm = new HeliFDM();
 const afcs = new AFCS(fdm);
@@ -54,30 +64,46 @@ let view = 'cockpit', ovForce = null, hudOn = true;
 const VIEWS = ['cockpit', 'ext', 'tour'], VIEW_LBL = { cockpit: 'COCKPIT', ext: 'EXTÉRIEURE', tour: 'TOUR / PONT' };
 const look = { yaw: 0, pitch: -0.17, az: Math.PI, el: 0.2, dist: 30, fov: 72 };
 let recColl = 0, acc = 0, simT = 0, frameN = 0, fps = 60, spin = 0;
-const M = { phase: 0, airT: 0, td: null, settle: 0, maxTq: 0, flown: false, startKind: 'pad', done: false, landT: 0 };
-const STEPS = ['Mise en stationnaire', 'Décollage et départ vers le large', 'Transit vers le navire', 'Approche par l\'arrière bâbord', 'Stationnaire au-dessus du spot', 'Appontage'];
+const M = { phase: 0, airT: 0, td: null, settle: 0, maxTq: 0, flown: false, done: false, wp: 1, plan: [], xtk: 0, trail: [], far: false };
+const STEPS = {
+  mer: ['Mise en stationnaire', 'Décollage et départ vers le large', 'Transit vers le navire', 'Approche par l\'arrière bâbord', 'Stationnaire au-dessus du spot', 'Appontage'],
+  pau: ['Mise en stationnaire', 'Décollage et départ', 'Navigation tactique dans la vallée', 'Approche de la zone de poser', 'Stationnaire au-dessus de la zone', 'Poser en montagne'],
+};
+const RANGES = [0, 1, 2, 5, 10, 20]; let rngSel = 0;
 
 function reset() {
   env = new Environment(cfg);
-  world.applyConfig(cfg);
+  const th = env.mission.theatre;
+  world.setTheatre(th); world.applyConfig(cfg);
+  if (!relief[th]) relief[th] = buildRelief(th === 'pau' ? { n0: PAU_DEM.n0, n1: PAU_DEM.n1, e0: PAU_DEM.e0, e1: PAU_DEM.e1, step: 100 } : { n0: -9000, n1: 8500, e0: -9000, e1: 9000, step: 50 }, terrainH);
   fdm.p.mass = cfg.mass; fdm.engFail = 0; fdm.brakes = true;
-  const S = env.ship, sp = env.spotWorld(), brgShip = Math.atan2(sp.e, sp.n);
-  const hx = S.cp, hy = S.sp;          // axe du navire
-  let o = { n: 0, e: 0, alt: FIELD_ALT + 1.8, psi: Math.round(brgShip * R2D / 10) * 10 * D2R, u: 0, theta: 0, phi: 0 };
+  const S = env.ship, L = env.landing(), plan = env.plan(), last = plan.length - 1;
+  // axe d'approche : axe du navire, ou dernière branche du plan de vol
+  const apsi = env.hasShip ? S.psi : Math.atan2(L.e - plan[last - 1].e, L.n - plan[last - 1].n), ax = Math.cos(apsi), ay = Math.sin(apsi), vT = env.hasShip ? S.v : 0;
+  const dens = 1 + 0.1 * L.h / 1400;        // à iso-masse, il faut plus de pas en altitude
+  let o = { n: 0, e: 0, alt: fieldAlt() + 1.8, psi: Math.round(Math.atan2(plan[1].e, plan[1].n) * R2D / 10) * 10 * D2R, u: 0, theta: 0, phi: 0 }, wp0 = 1;
   recColl = 0;
-  const back = (d, up, u, th, c) => { o = { n: sp.n - hx * d, e: sp.e - hy * d, alt: up, psi: S.psi, u, theta: th * D2R, phi: u < 15 ? -2.5 * D2R : 0 }; recColl = c; };
-  if (cfg.start === 'transit') { const d = 2 * NM; o = { n: sp.n - Math.cos(brgShip) * d, e: sp.e - Math.sin(brgShip) * d, alt: 152, psi: brgShip, u: 51, theta: -2.5 * D2R, phi: 0 }; recColl = 0.34; }
-  if (cfg.start === 'final') back(0.5 * NM, 76, 31, 0.5, 0.31);
-  if (cfg.start === 'short') back(150, sp.h + 26, S.v + 11, 2.5, 0.40);
-  if (cfg.start === 'deckhover') back(0, sp.h + 1.9 + 4.6, S.v, 1.5, 0.47);
-  if (cfg.start === 'deck') back(0, sp.h + 1.8, S.v, 0, 0);
+  const back = (d, hgt, u, th2, c) => {
+    const n = L.n - ax * d, e = L.e - ay * d;
+    o = { n, e, alt: Math.max(L.h + hgt, d > 0 ? env.surface(n, e).h + 45 : 0), psi: apsi, u, theta: th2 * D2R, phi: u < 15 ? -2.5 * D2R : 0 }; recColl = c; wp0 = last;
+  };
+  if (cfg.start === 'transit') {
+    if (env.hasShip) { const b = Math.atan2(L.e, L.n), d = 2 * NM; o = { n: L.n - Math.cos(b) * d, e: L.e - Math.sin(b) * d, alt: 152, psi: b, u: 51, theta: -2.5 * D2R, phi: 0 }; wp0 = last - 1; }
+    else { const m = Math.ceil(last / 2), a = plan[m], b = plan[m + 1], hd = Math.atan2(b.e - a.e, b.n - a.n); o = { n: a.n, e: a.e, alt: terrainH(a.n, a.e) + 150, psi: hd, u: 51, theta: -2.5 * D2R, phi: 0 }; wp0 = m + 1; }
+    recColl = 0.34 * dens;
+  }
+  if (cfg.start === 'final') back(0.5 * NM, 76, 31, 0.5, 0.31 * dens);
+  if (cfg.start === 'short') back(150, 26, vT + 11, 2.5, 0.40 * dens);
+  if (cfg.start === 'deckhover') back(0, 1.9 + 4.6, vT, 1.5, 0.47 * dens);
+  if (cfg.start === 'deck') back(0, 1.8, vT, 0, 0);
   fdm.reset(o);
   afcs.reset(); afcs.mode = cfg.mode;
   if (recColl > 0) afcs.sync(recColl);
   input.kb.coll = recColl; input.collKb = true;
   env.update(0, fdm); fdm.updateDerived(env.wind);
   fdm.surf = env.surface(fdm.pos[0], fdm.pos[1]); fdm.agl = fdm.alt - fdm.surf.h;
-  Object.assign(M, { phase: 0, airT: 0, td: null, settle: 0, maxTq: 0, flown: recColl > 0, startKind: cfg.start === 'deck' ? 'deck' : 'pad', done: false, landT: 0 });
+  Object.assign(M, { phase: 0, airT: 0, td: null, settle: 0, maxTq: 0, flown: recColl > 0, done: false, wp: wp0, plan, xtk: 0, trail: [], far: cfg.start !== 'pad', prevWow: 0, navT: 0, aglSum: 0, aglMin: 1e9, xtkSum: 0, trailT: 0 });
+  $('mTitle').textContent = env.hasShip ? 'Mission : appontage BPC' : `Mission : ${L.name}`;
   acc = 0; simT = 0; look.yaw = 0; look.pitch = -0.17;
   $('debrief').classList.add('hide'); $('alert').textContent = '';
   state = 'ready';
@@ -93,10 +119,10 @@ const fields = {
 for (const id in fields) { const el = $(id), out = el.parentElement.querySelector('output'), f = fields[id]; const upd = () => { out.textContent = f[1](+el.value); }; el.addEventListener('input', upd); upd(); }
 function readMenu() {
   for (const id in fields) { const f = fields[id]; cfg[f[0]] = +$(id).value * (f[2] || 1); }
-  cfg.start = $('cStart').value; cfg.spot = +$('cSpot').value; cfg.mode = $('cMode').value; cfg.airwake = $('cWake').value === '1';
+  cfg.start = $('cStart').value; cfg.mission = $('cMission').value; cfg.spot = +$('cSpot').value; cfg.mode = $('cMode').value; cfg.airwake = $('cWake').value === '1';
 }
 function showMenu(resumable) { state = resumable ? 'pause' : 'menu'; $('menu').classList.remove('hide'); $('resume').classList.toggle('hide', !resumable); buildPadTable(); }
-$('bGo').onclick = () => { readMenu(); $('menu').classList.add('hide'); reset(); audio.init(); };
+$('bGo').onclick = async () => { readMenu(); audio.init(); await demReady; $('menu').classList.add('hide'); reset(); };
 $('bResume').onclick = () => { $('menu').classList.add('hide'); state = 'fly'; };
 $('dAgain').onclick = () => { reset(); }; $('dMenu').onclick = () => { $('debrief').classList.add('hide'); showMenu(false); };
 
@@ -162,6 +188,7 @@ input.on('key', (code) => {
   if (code === 'KeyO') ovForce = !(ovForce ?? view !== 'cockpit');
   if (code === 'KeyH') hudOn = !hudOn;
   if (code === 'KeyN') audio.toggle();
+  if (code === 'KeyG') { rngSel = (rngSel + 1) % RANGES.length; flash(RANGES[rngSel] ? `SITAC ${RANGES[rngSel]} NM` : 'SITAC ÉCHELLE AUTO'); }
 });
 input.on('btn', (id) => action(id));
 let flashT = 0; function flash(t) { $('alert').textContent = t; $('alert').className = ''; flashT = 2; }
@@ -209,31 +236,43 @@ const audio = {
 };
 
 // ---------------------------------------------------------------- mission et débriefing
+// cible de l'écran « stationnaire » : hélisurface de départ tant qu'on ne l'a pas quittée, sinon point de poser
 function target() {
-  const sp = env.spotWorld(), ds = Math.hypot(sp.n - fdm.pos[0], sp.e - fdm.pos[1]), dp = Math.hypot(fdm.pos[0], fdm.pos[1]);
-  if (dp < 500 && ds > 1500 && !M.flown) return { kind: 'pad', n: 0, e: 0, h: FIELD_ALT, psi: fdm.psi, vn: 0, ve: 0, vu: 0, dist: dp, name: 'HÉLI' };
-  const S = env.ship;
-  return { kind: 'deck', n: sp.n, e: sp.e, h: sp.h, psi: S.psi, vn: S.vn, ve: S.ve, vu: S.heaveD + sp.f * S.pitchD - sp.s * S.rollD, dist: ds, name: 'BPC', spot: SHIP.spots.find((x) => x.id === cfg.spot) };
+  const L = env.landing(), f = fdm, dl = Math.hypot(L.n - f.pos[0], L.e - f.pos[1]), dp = Math.hypot(f.pos[0], f.pos[1]);
+  if (!M.far) return { kind: 'pad', name: 'HÉLISURFACE', n: 0, e: 0, h: fieldAlt(), psi: f.psi, vn: 0, ve: 0, vu: 0, dist: dp };
+  return { ...L, dist: dl, spot: L.kind === 'deck' ? SHIP.spots.find((x) => x.id === cfg.spot) : null };
 }
 function missionUpdate(dt) {
-  const f = fdm, tg = target(), sp = env.spotWorld(), ds = Math.hypot(sp.n - f.pos[0], sp.e - f.pos[1]);
+  const f = fdm, L = env.landing(), plan = env.plan(), sea = env.hasShip; M.plan = plan;
+  const dl = Math.hypot(L.n - f.pos[0], L.e - f.pos[1]), dp = Math.hypot(f.pos[0], f.pos[1]);
+  if (dp > 600) M.far = true;
   M.maxTq = Math.max(M.maxTq, f.tq);
   if (!f.wow) { M.airT += dt; if (M.airT > 8) M.flown = true; }
-  const overDeck = f.surf && f.surf.kind === 'deck';
+  // séquencement du plan de vol : point validé à moins de 500 m, ou une fois son travers dépassé
+  while (M.wp < plan.length - 1) {
+    const w = plan[M.wp], nx = plan[M.wp + 1], d = Math.hypot(w.n - f.pos[0], w.e - f.pos[1]);
+    const along = (f.pos[0] - w.n) * (nx.n - w.n) + (f.pos[1] - w.e) * (nx.e - w.e);
+    if (d < 500 || (along > 0 && d < 3000)) M.wp++; else break;
+  }
+  const a = plan[M.wp - 1], b = plan[M.wp], ln = b.n - a.n, le = b.e - a.e, ll = Math.hypot(ln, le) || 1;
+  M.xtk = ((f.pos[1] - a.e) * ln - (f.pos[0] - a.n) * le) / ll;            // > 0 : à droite de la route
+  M.trailT -= dt; if (M.trailT <= 0 && dt > 0) { M.trailT = 3; M.trail.push([f.pos[0], f.pos[1]]); if (M.trail.length > 500) M.trail.shift(); }
   // phase courante
+  const over = sea ? (f.surf && f.surf.kind === 'deck' && f.agl < 20) : (dl < 70 && f.alt - L.h < 25);
   let ph;
   if ((f.wow || (state === 'ready' && recColl === 0)) && !M.flown) ph = 0;
-  else if (overDeck && (f.agl < 20) && M.flown) ph = f.wow ? 5 : 4;
-  else if (ds < 1.0 * NM) ph = M.startKind === 'deck' && !M.farOnce ? 1 : 3;
-  else if (Math.hypot(f.pos[0], f.pos[1]) < 400 && M.startKind === 'pad' && cfg.start === 'pad') ph = f.wow ? 0 : 1;
+  else if (over && M.flown) ph = f.wow ? 5 : 4;
+  else if (!M.far) ph = f.wow ? 0 : 1;
+  else if (dl < (sea ? NM : 1800)) ph = 3;
   else ph = 2;
-  if (ds > 1.2 * NM) M.farOnce = true;
   M.phase = ph;
+  if (ph === 2 && !f.wow && dt > 0) { M.navT += dt; M.aglSum += f.agl * dt; M.aglMin = Math.min(M.aglMin, f.agl); M.xtkSum += Math.abs(M.xtk) * dt; }
   // toucher des roues
   if (f.wow && !M.prevWow && M.flown) {
     const S = env.ship, s = f.surf, rel = Math.hypot(f.vw[0] - s.vn, f.vw[1] - s.ve);
     M.td = { vs: Math.max(f.lastAirVs, f.maxTouchVs), kind: s.kind, rel, hdgErr: Math.abs(Math.atan2(Math.sin(f.psi - S.psi), Math.cos(f.psi - S.psi))) * R2D, t: simT };
     if (s.kind === 'deck') { const spt = SHIP.spots.find((x) => x.id === cfg.spot); M.td.df = s.f - spt.f; M.td.ds = s.s - spt.s; M.td.err = Math.hypot(M.td.df, M.td.ds); }
+    else if (!sea) { M.td.err = dl; M.td.onLz = dl < 150; M.td.brg = Math.atan2(f.pos[1] - L.e, f.pos[0] - L.n) * R2D; }
   }
   if (!f.wow) f.maxTouchVs = 0;
   M.prevWow = f.wow;
@@ -242,42 +281,50 @@ function missionUpdate(dt) {
   if (f.wowAll && M.flown && M.td && input.state.coll < 0.3 && relSpd < 0.6) M.settle += dt; else M.settle = 0;
   if (M.settle > 2.5 && !M.done) { M.done = true; debrief(false); }
   // consignes
-  const brg = pad3(Math.atan2(sp.e - f.pos[1], sp.n - f.pos[0]) * R2D), S = env.ship;
-  const hints = [
+  const brg = pad3(Math.atan2(b.e - f.pos[1], b.n - f.pos[0]) * R2D), dw = (Math.hypot(b.n - f.pos[0], b.e - f.pos[1]) / NM).toFixed(1), S = env.ship;
+  const hints = sea ? [
     `Freins serrés. Montez doucement le collectif (≈ 50 %) jusqu'au décollage des roues, stabilisez à 10 ft.`,
-    `Assiette à piquer 5° pour accélérer, montez vers 500 ft. Cap ${brg}° vers le BPC.`,
-    `Croisière 500 ft / 100–120 kt, cap ${brg}°. Navire à ${(ds / NM).toFixed(1)} NM, route ${pad3(S.psi * R2D)}° à ${Math.round(S.v * KT)} kt.`,
+    `Assiette à piquer 5° pour accélérer, montez vers 500 ft. Cap ${brg}° vers ${b.name}.`,
+    `Croisière 500 ft / 100–120 kt. ${b.name} au ${brg}° / ${dw} NM. Navire : route ${pad3(S.psi * R2D)}° à ${Math.round(S.v * KT)} kt.`,
     `Présentez-vous dans l'axe arrière bâbord (ligne jaune). 60 kt à 0,5 NM / 250 ft, puis 30 kt à 0,2 NM / 100 ft. Évitez Vz > 500 ft/min sous 30 kt (vortex).`,
     `Stationnaire au-dessus du spot ${cfg.spot} : accompagnez le navire (${Math.round(S.v * KT)} kt), attendez une accalmie du pont, puis descendez franchement.`,
     `Roues posées : baissez le collectif à fond pour valider l'appontage.`,
+  ] : [
+    `Freins serrés. Montez doucement le collectif (≈ 50 %) jusqu'au décollage des roues, stabilisez à 10 ft.`,
+    `Assiette à piquer 5° pour accélérer. Cap ${brg}° vers ${b.name}.`,
+    `Vol tactique : ${b.name} au ${brg}° / ${dw} NM. Suivez le fond de vallée entre 150 et 300 ft sol, 90–110 kt ; anticipez les montées (zone de poser à ${Math.round(L.h * FT / 10) * 10} ft).`,
+    `Approche ${L.name} (${Math.round(L.h * FT / 10) * 10} ft) : lisez le vent au fumigène et à la manche à air, 60 kt à 1 km, finale face au vent. En altitude la marge de puissance est réduite : surveillez le couple.`,
+    `Stationnaire au-dessus du H : descente verticale, Vz inférieure à 300 ft/min.`,
+    `Roues posées : baissez le collectif à fond pour valider le poser.`,
   ];
-  $('mSteps').innerHTML = STEPS.map((s, i) => `<li class="${i === ph ? 'cur' : i < ph ? 'done' : ''}">${s}</li>`).join('');
+  $('mSteps').innerHTML = STEPS[sea ? 'mer' : 'pau'].map((t, i) => `<li class="${i === ph ? 'cur' : i < ph ? 'done' : ''}">${t}${i === 2 && ph === 2 ? ` — ${b.name} (${M.wp}/${plan.length - 1})` : ''}</li>`).join('');
   $('mHint').textContent = hints[ph];
-  return tg;
+  return target();
 }
 function grade(v, lims) { for (let i = 0; i < lims.length; i++) if (v <= lims[i][0]) return lims[i]; return lims[lims.length - 1]; }
 function debrief(crash) {
   state = 'debrief'; $('debrief').classList.remove('hide');
-  const td = M.td, rows = []; let score = 100;
+  const td = M.td, rows = [], sea = env.hasShip, L = env.landing(); let score = 100;
+  const nav = () => { if (M.navT > 20) { rows.push(['Hauteur sol moyenne en navigation', `${Math.round(M.aglSum / M.navT * FT / 10) * 10} ft (mini ${Math.round(M.aglMin * FT)} ft)`, '']); rows.push(['Écart moyen au plan de vol', `${Math.round(M.xtkSum / M.navT / 10) * 10} m`, '']); } };
   if (crash) {
     $('dTitle').textContent = 'Appareil perdu'; $('dTitle').className = 'bad'; $('dSub').textContent = fdm.crashed.why; $('score').textContent = '';
     if (td) rows.push(['Vitesse verticale au toucher', `${Math.round(td.vs * 196.85)} ft/min`, '']);
     rows.push(['Vitesse au moment de l\'accident', `${Math.round(fdm.gs * KT)} kt sol, Vz ${Math.round(fdm.vs * 196.85)} ft/min`, '']);
-    rows.push(['Durée du vol', `${Math.floor(simT / 60)} min ${Math.round(simT % 60)} s`, '']);
+    nav(); rows.push(['Durée du vol', `${Math.floor(simT / 60)} min ${Math.round(simT % 60)} s`, '']);
   } else {
-    const onDeck = td.kind === 'deck';
-    $('dTitle').textContent = onDeck ? `Appontage réussi — spot ${cfg.spot}` : 'Atterrissage à terre'; $('dTitle').className = 'ok';
-    $('dSub').textContent = onDeck ? 'Analyse du toucher des roues' : 'Posé hors du navire : mission d\'appontage non réalisée, analyse du poser.';
+    const onDeck = td.kind === 'deck', onLz = !!td.onLz, good = onDeck || onLz;
+    $('dTitle').textContent = onDeck ? `Appontage réussi — spot ${cfg.spot}` : onLz ? `Poser réussi — ${L.name}` : 'Atterrissage hors zone'; $('dTitle').className = good ? 'ok' : 'warn';
+    $('dSub').textContent = good ? 'Analyse du toucher des roues' : 'Posé en dehors du point prévu : mission non réalisée, analyse du poser.';
     const add = (label, val, g) => { score -= g[1]; rows.push([label, val, `<span class="${g[1] === 0 ? 'ok' : g[1] < 20 ? 'warn' : 'bad'}">${g[2]}</span>`]); };
     add('Vitesse verticale au toucher', `${Math.round(td.vs * 196.85)} ft/min`, grade(td.vs * 196.85, [[200, 0, 'excellent'], [350, 10, 'correct'], [500, 25, 'ferme'], [1e9, 45, 'dur']]));
     if (onDeck) {
       add('Écart au centre du spot', `${td.err.toFixed(1)} m (${Math.abs(td.df).toFixed(1)} m ${td.df > 0 ? 'en avant' : 'en arrière'}, ${Math.abs(td.ds).toFixed(1)} m ${td.ds > 0 ? 'à droite' : 'à gauche'})`, grade(td.err, [[1.5, 0, 'excellent'], [3, 10, 'correct'], [6, 25, 'imprécis'], [1e9, 40, 'hors spot']]));
       add('Alignement avec l\'axe du navire', `${td.hdgErr.toFixed(0)}°`, grade(td.hdgErr, [[5, 0, 'excellent'], [10, 5, 'correct'], [20, 15, 'désaxé'], [1e9, 25, 'très désaxé']]));
-    }
+    } else if (onLz) add('Écart au centre de la zone (H)', `${td.err.toFixed(1)} m au ${pad3(td.brg)}°`, grade(td.err, [[3, 0, 'excellent'], [8, 10, 'correct'], [20, 25, 'imprécis'], [1e9, 40, 'hors marquage']]));
     add('Vitesse relative au toucher', `${(td.rel * KT).toFixed(1)} kt`, grade(td.rel * KT, [[2, 0, 'excellent'], [4, 10, 'glissé'], [1e9, 20, 'trop rapide']]));
     add('Couple maximal pendant le vol', `${Math.round(M.maxTq)} %`, grade(M.maxTq, [[100, 0, 'dans les limites'], [110, 5, 'transitoire'], [1e9, 15, 'surcouple']]));
-    rows.push(['Durée du vol', `${Math.floor(simT / 60)} min ${Math.round(simT % 60)} s`, '']);
-    if (!onDeck) score = Math.min(score, 50);
+    nav(); rows.push(['Durée du vol', `${Math.floor(simT / 60)} min ${Math.round(simT % 60)} s`, '']);
+    if (!good) score = Math.min(score, 50);
     $('score').innerHTML = `<span class="${score >= 80 ? 'ok' : score >= 55 ? 'warn' : 'bad'}">${Math.max(0, score)} / 100</span>`;
   }
   $('dTable').innerHTML = rows.map((r) => `<tr><td>${r[0]}</td><td><b>${r[1]}</b></td><td>${r[2]}</td></tr>`).join('');
@@ -285,7 +332,7 @@ function debrief(crash) {
 
 // ---------------------------------------------------------------- données instruments
 function snapshot(tg) {
-  const f = fdm, sp = env.spotWorld();
+  const f = fdm, wp = M.plan[M.wp], wn = wp.n - f.pos[0], we = wp.e - f.pos[1];
   const dn = tg.n - f.pos[0], de = tg.e - f.pos[1], c = Math.cos(f.psi), s = Math.sin(f.psi);
   const rvn = f.vw[0] - tg.vn, rve = f.vw[1] - tg.ve;
   const cautions = [];
@@ -300,20 +347,20 @@ function snapshot(tg) {
     ias: f.tas * KT, alt: f.alt * FT, ra: Math.max(0, f.agl - 1.85) * FT, vs: f.vs * 196.85, hdg: wrap360(f.psi * R2D), pitch: f.theta, roll: f.phi,
     slip: clamp(f.accB[1] / 9.81, -0.3, 0.3), tq: f.tq, nr: f.nr, gs: f.gs * KT, trk: f.gs > 1 ? wrap360(Math.atan2(f.vw[1], f.vw[0]) * R2D) : wrap360(f.psi * R2D),
     windDir: wrap360(Math.atan2(-mw[1], -mw[0]) * R2D), windKt: Math.hypot(mw[0], mw[1]) * KT, mode: afcs.mode, thRef: afcs.thRef, phRef: afcs.phRef,
-    tgtBrg: wrap360(Math.atan2(de, dn) * R2D), tgtDist: tg.dist / NM, tgtName: tg.name, warn: cautions.find((x) => x.level === 2) || cautions[0],
-    n: f.pos[0], e: f.pos[1], ship: env.ship, cautions, coll: input.state.coll, lon: input.state.lon, lat: input.state.lat, ped: input.state.ped,
+    tgtBrg: wrap360(Math.atan2(we, wn) * R2D), tgtDist: Math.hypot(wn, we) / NM, tgtName: wp.name, warn: cautions.find((x) => x.level === 2) || cautions[0],
+    n: f.pos[0], e: f.pos[1], ship: env.hasShip ? env.ship : null, cautions, map: relief[env.mission.theatre], plan: M.plan, wpI: M.wp, xtk: M.xtk, trail: M.trail, lzAlt: env.landing().h,
+    rng: RANGES[rngSel] || (Math.hypot(wn, we) / NM > 7 ? 10 : Math.hypot(wn, we) / NM > 2.5 ? 5 : Math.hypot(wn, we) / NM > 0.8 ? 2 : 1), coll: input.state.coll, lon: input.state.lon, lat: input.state.lat, ped: input.state.ped,
     swLon: afcs.pos.lon, swLat: afcs.pos.lat, swPed: afcs.pos.ped, fuel: f.fuel, ff: f.Peng * f.p.sfc * 3600, mass: f.totalMass, brakes: f.brakes, wow: f.wow, nz: f.nz,
     engFail: f.engFail, pkw: f.Peng / 1000,
     hov: {
       dx: dn * c + de * s, dy: -dn * s + de * c, relHdg: tg.kind === 'deck' ? tg.psi - f.psi : 0, vx: rvn * c + rve * s, vy: -rvn * s + rve * c,
-      hgt: Math.max(0, f.alt - 1.85 - tg.h), vz: f.vs - tg.vu, kind: tg.kind, spot: tg.spot, heave: env.ship.heave, roll: env.ship.roll, pitch: env.ship.pitch,
+      hgt: Math.max(0, f.alt - 1.85 - tg.h), vz: f.vs - tg.vu, kind: tg.kind, name: tg.name, spot: tg.spot, heave: env.ship.heave, roll: env.ship.roll, pitch: env.ship.pitch,
     },
   };
 }
 
 // ---------------------------------------------------------------- boucle principale
 const tmpM = new THREE.Matrix4(), vR = new THREE.Vector3(), vU = new THREE.Vector3(), vB = new THREE.Vector3(), camQ = new THREE.Quaternion(), eul = new THREE.Euler(0, 0, 0, 'YXZ');
-const TOWER = BUILDINGS.find((b) => b.kind === 'tower');
 let last = performance.now(), snap = null, hudT = 0;
 
 function frame(now) {
@@ -365,9 +412,11 @@ function frame(now) {
     const s = env.surface(-camera.position.z, camera.position.x); camera.position.y = Math.max(camera.position.y, s.h + 1.2);
     camera.lookAt(heli.position.x, heli.position.y + 1, heli.position.z); camera.fov = 55;
   } else {
-    const S = env.ship, ds = Math.hypot(fdm.pos[0] - S.n, fdm.pos[1] - S.e), dtw = Math.hypot(fdm.pos[0] - TOWER.n, fdm.pos[1] - TOWER.e);
-    if (ds < dtw) { const [n, e] = env.fromDeck(-20, 12); camera.position.set(e, DECK_H + S.heave + 19, -n); }
-    else camera.position.set(TOWER.e, FIELD_ALT + TOWER.h + 1, -TOWER.n + 7);
+    const S = env.ship, L = env.landing(), TOWER = buildings().find((b) => b.kind === 'tower');
+    const ds = Math.hypot(fdm.pos[0] - L.n, fdm.pos[1] - L.e), dtw = Math.hypot(fdm.pos[0] - TOWER.n, fdm.pos[1] - TOWER.e);
+    if (ds < dtw && env.hasShip) { const [n, e] = env.fromDeck(-20, 12); camera.position.set(e, DECK_H + S.heave + 19, -n); }
+    else if (ds < dtw) camera.position.set(L.e + 55, terrainH(L.n - 35, L.e + 55) + 2.5, -(L.n - 35));          // observateur au sol près de la zone de poser
+    else camera.position.set(TOWER.e, fieldAlt() + TOWER.h + 1, -TOWER.n + 7);
     camera.lookAt(heli.position); camera.fov = clamp(2 * Math.atan(26 / camera.position.distanceTo(heli.position)) * R2D, 4, 60);
   }
   camera.updateProjectionMatrix();
@@ -378,7 +427,7 @@ function frame(now) {
     const tg = missionUpdate(state === 'fly' ? dt : 0);
     snap = snapshot(tg);
     const k = ['pfd', 'nd', 'hov', 'eng'][frameN % 4];
-    ({ pfd: drawPFD, nd: drawND, hov: drawHOV, eng: drawENG })[k](ctx[k], snap); tex[k].needsUpdate = true;
+    ({ pfd: drawPFD, nd: drawSITAC, hov: drawHOV, eng: drawENG })[k](ctx[k], snap); tex[k].needsUpdate = true;
   }
   hudT -= dt;
   if (hudT <= 0 && snap) {
@@ -391,7 +440,7 @@ function frame(now) {
     $('hVs').textContent = Math.round(s.vs / 10) * 10; $('hHdg').textContent = pad3(s.hdg); $('hTq').textContent = `${Math.round(s.tq)} %`; $('hTq').className = s.tq > 110 ? 'bad' : s.tq > 100 ? 'warn' : '';
     $('hNr').textContent = `${Math.round(s.nr)} %`; $('hNr').className = s.nr < 95 ? 'bad' : ''; $('hMode').textContent = s.mode; $('hView').textContent = VIEW_LBL[view];
     $('collFill').style.height = `${s.coll * 192}px`; $('collMark').style.bottom = `${4 + recColl * 192}px`; $('collMark').style.display = state === 'ready' ? '' : 'none';
-    $('status').innerHTML = `Vent <b>${pad3(s.windDir)}° / ${Math.round(s.windKt)} kt</b> · mer <b>${cfg.seaState}</b><br>${input.useGamepad ? `Joystick : <b>${input.gpId.slice(0, 28)}</b>` : '<b>Clavier</b> (aucun joystick)'}<br>${Math.round(fps)} images/s · P = pause`;
+    $('status').innerHTML = `Vent <b>${pad3(s.windDir)}° / ${Math.round(s.windKt)} kt</b> · ${env.hasShip ? `mer <b>${cfg.seaState}</b>` : `sol <b>${Math.round(fdm.surf ? fdm.surf.h * FT / 10 : 0) * 10} ft</b>`}<br>${input.useGamepad ? `Joystick : <b>${input.gpId.slice(0, 28)}</b>` : '<b>Clavier</b> (aucun joystick)'}<br>${Math.round(fps)} images/s · P = pause`;
     if (flashT > 0) { flashT -= 0.1; if (flashT <= 0) $('alert').textContent = ''; }
     else if (state === 'fly' && s.warn && s.warn.level === 2) { $('alert').textContent = s.warn.t; $('alert').className = 'bad'; }
     else if (state === 'fly') $('alert').textContent = '';
@@ -400,7 +449,7 @@ function frame(now) {
   renderer.render(scene, camera);
 }
 
-world.applyConfig(cfg);
+world.setTheatre('mer'); world.applyConfig(cfg);
 showMenu(false);
 requestAnimationFrame(frame);
 // accès console pour les essais

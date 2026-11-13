@@ -4,7 +4,8 @@
 // ============================================================================
 import * as THREE from 'three';
 import { Sky } from 'three/examples/jsm/objects/Sky.js';
-import { terrainH, coastN, fbm, FIELD_ALT, BUILDINGS, RUNWAY, SHIP, DECK_H, deckHalfWidth } from './env.js';
+import { terrainH, coastN, fbm, FIELD_ALT, RUNWAY, SHIP, DECK_H, deckHalfWidth, PAU, MISSIONS, waypoint, setTheatre, theatre, buildings } from './env.js';
+import { PAU_DEM } from './pau-dem.js';
 
 const D2R = Math.PI / 180;
 export const v3 = (n, e, alt) => new THREE.Vector3(e, alt, -n);
@@ -91,13 +92,13 @@ function buildSea() {
 const clamp8 = (v) => Math.max(-127, Math.min(127, v));
 
 // ---------------------------------------------------------------- aérodrome
-function flatRect(n, e, dn, de, tex, y = 0.06, rot = 0) {
+function flatRect(n, e, dn, de, tex, y = 0.06, rot = 0, alt = FIELD_ALT) {
   const m = new THREE.Mesh(new THREE.PlaneGeometry(de, dn), new THREE.MeshLambertMaterial({ map: tex, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
-  m.rotation.x = -Math.PI / 2; m.rotation.z = rot; m.position.set(e, FIELD_ALT + y, -n); m.receiveShadow = true;
+  m.rotation.x = -Math.PI / 2; m.rotation.z = rot; m.position.set(e, alt + y, -n); m.receiveShadow = true;
   return m;
 }
-function buildAirport(scene) {
-  const g = new THREE.Group();
+function buildAirport(scene, A = { alt: FIELD_ALT, rw: { ...RUNWAY, hdg: 90, a: '09', b: '27' }, taxi: true }) {
+  const g = new THREE.Group(), ALT = A.alt, RW = A.rw, rh = RW.hdg * D2R;
   // piste 09/27
   const rw = canvasTex(4096, 128, (x, w, h) => {
     x.fillStyle = '#3b3d40'; x.fillRect(0, 0, w, h);
@@ -107,14 +108,14 @@ function buildAirport(scene) {
     for (let i = 300; i < w - 300; i += 176) x.fillRect(i, h / 2 - 1.5, 88, 3);
     for (const x0 of [40, w - 130]) for (let k = 0; k < 8; k++) x.fillRect(x0, 12 + k * 13.5 + (k > 3 ? 6 : 0), 90, 7);
     x.font = 'bold 54px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
-    x.save(); x.translate(190, h / 2); x.rotate(Math.PI / 2); x.fillText('09', 0, 0); x.restore();
-    x.save(); x.translate(w - 190, h / 2); x.rotate(-Math.PI / 2); x.fillText('27', 0, 0); x.restore();
+    x.save(); x.translate(190, h / 2); x.rotate(Math.PI / 2); x.fillText(RW.a, 0, 0); x.restore();
+    x.save(); x.translate(w - 190, h / 2); x.rotate(-Math.PI / 2); x.fillText(RW.b, 0, 0); x.restore();
   });
-  g.add(flatRect(RUNWAY.n, RUNWAY.e, RUNWAY.wid, RUNWAY.len, rw, 0.05));
+  g.add(flatRect(RW.n, RW.e, RW.wid, RW.len, rw, 0.05, Math.PI / 2 - rh, ALT));
   // taxiway + aire de trafic
   const tw = canvasTex(64, 512, (x, w, h) => { x.fillStyle = '#4a4c4f'; x.fillRect(0, 0, w, h); speckle(x, w, h, 500, ['#444649', '#505255'], 2, 8); x.fillStyle = '#d8b400'; x.fillRect(w / 2 - 1.5, 0, 3, h); });
-  g.add(flatRect(120, 0, 110, 18, tw, 0.04));
-  g.add(flatRect(120, -120, 110, 18, tw, 0.04));
+  if (A.taxi) { g.add(flatRect(120, 0, 110, 18, tw, 0.04)); g.add(flatRect(120, -120, 110, 18, tw, 0.04)); }
+  else { g.add(flatRect(330, 60, 560, 18, tw, 0.04, -0.25, ALT)); }
   const ap = canvasTex(2048, 1024, (x, w, h) => {
     // 1 px = 0,125 m : aire 256 m x 128 m, centre = hélisurface principale
     x.fillStyle = '#6d6f70'; x.fillRect(0, 0, w, h);
@@ -131,10 +132,10 @@ function buildAirport(scene) {
     pad(w / 2, h / 2, 'H1'); pad(w / 2 + 560, h / 2, 'H2'); pad(w / 2 - 560, h / 2, 'H3');
     x.strokeStyle = '#d8b400'; x.lineWidth = 3; x.beginPath(); x.moveTo(0, 60); x.lineTo(w, 60); x.stroke();
   });
-  g.add(flatRect(0, 0, 128, 256, ap, 0.07));
+  g.add(flatRect(0, 0, 128, 256, ap, 0.07, 0, ALT));
   // bâtiments
   const wall = new THREE.MeshLambertMaterial({ color: 0xb9bcc0 }), roof = new THREE.MeshLambertMaterial({ color: 0x5c6670 }), glass = new THREE.MeshLambertMaterial({ color: 0x2c4a5c });
-  for (const b of BUILDINGS) {
+  for (const b of buildings()) {
     const base = terrainH(b.n, b.e);
     if (b.kind === 'tower') {
       const s = new THREE.Mesh(new THREE.BoxGeometry(5, b.h - 5, 5), wall); s.position.set(b.e, base + (b.h - 5) / 2, -b.n);
@@ -165,16 +166,18 @@ function buildAirport(scene) {
     seg.rotation.x = Math.PI / 2; seg.position.z = 0.35 + i * 0.7; cone.add(seg);
   }
   cone.position.y = 6.8; sock.add(pole, cone);
-  sock.position.set(48, FIELD_ALT, 48); sock.userData.cone = cone;
+  sock.position.set(48, ALT, 48); sock.userData.cone = cone;
   g.add(sock);
   // balisage
   const pts = [], cols = [];
-  for (let e = -RUNWAY.len / 2; e <= RUNWAY.len / 2; e += 60) for (const s of [-1, 1]) { pts.push(RUNWAY.e + e, FIELD_ALT + 0.4, -(RUNWAY.n + s * (RUNWAY.wid / 2 + 1))); cols.push(1, 1, 0.85); }
-  for (let a = 0; a < 16; a++) { pts.push(13.5 * Math.cos(a * Math.PI / 8), FIELD_ALT + 0.3, 13.5 * Math.sin(a * Math.PI / 8)); cols.push(0.3, 1, 0.4); }
+  for (let d = -RW.len / 2; d <= RW.len / 2; d += 60) for (const s of [-1, 1]) {
+    const o = s * (RW.wid / 2 + 1); pts.push(RW.e + d * Math.sin(rh) + o * Math.cos(rh), ALT + 0.4, -(RW.n + d * Math.cos(rh) - o * Math.sin(rh))); cols.push(1, 1, 0.85);
+  }
+  for (let a = 0; a < 16; a++) { pts.push(13.5 * Math.cos(a * Math.PI / 8), ALT + 0.3, 13.5 * Math.sin(a * Math.PI / 8)); cols.push(0.3, 1, 0.4); }
   const lg = new THREE.BufferGeometry(); lg.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3)); lg.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
   g.add(new THREE.Points(lg, new THREE.PointsMaterial({ size: 2.2, sizeAttenuation: false, vertexColors: true })));
   scene.add(g);
-  return { sock };
+  return { sock, makeSock: () => { const c = sock.clone(true); c.userData.cone = c.children[1]; return c; } };
 }
 
 // ---------------------------------------------------------------- végétation, village, objets en mer
@@ -182,7 +185,7 @@ function buildScatter(scene) {
   const rnd = mulberry(12345), dummy = new THREE.Object3D();
   // arbres
   const NT = 9000, tg = new THREE.ConeGeometry(3.2, 9, 6); tg.translate(0, 5.5, 0);
-  const trees = new THREE.InstancedMesh(tg, new THREE.MeshLambertMaterial({ color: 0x35582f }), NT);
+  const trees = new THREE.InstancedMesh(tg, new THREE.MeshLambertMaterial({ color: 0xffffff }), NT);
   let k = 0, tries = 0; const tc = new THREE.Color();
   while (k < NT && tries++ < NT * 30) {
     const near = rnd() < 0.6;
@@ -192,7 +195,7 @@ function buildScatter(scene) {
     if (Math.abs(e + 100) < 1000 && Math.abs(n - 90) < 330) continue;
     if (fbm(e / 330 + 3, n / 330 + 9, 2) < 0.5) continue;
     const s = 0.7 + rnd() * 0.9; dummy.position.set(e, h - 0.5, -n); dummy.scale.set(s, s * (0.8 + rnd() * 0.5), s); dummy.rotation.y = rnd() * 6; dummy.updateMatrix();
-    trees.setMatrixAt(k, dummy.matrix); tc.setHSL(0.27 + rnd() * 0.06, 0.35, 0.2 + rnd() * 0.1); trees.setColorAt(k, tc); k++;
+    trees.setMatrixAt(k, dummy.matrix); tc.setHSL(0.27 + rnd() * 0.06, 0.4, 0.2 + rnd() * 0.1); trees.setColorAt(k, tc); k++;
   }
   trees.count = k; scene.add(trees);
   // maisons
@@ -233,6 +236,95 @@ function buildScatter(scene) {
   scene.add(boats, cabins);
 }
 function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+// ---------------------------------------------------------------- théâtre Pyrénées (relief réel)
+function buildPauTerrain() {
+  const D = PAU_DEM, nx = D.nx, nz = D.ny, step = D.step;
+  const pos = new Float32Array(nx * nz * 3), col = new Float32Array(nx * nz * 3), uv = new Float32Array(nx * nz * 2), hh = new Float32Array(nx * nz);
+  let k = 0;
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++, k++) hh[k] = terrainH(D.n0 + j * step, D.e0 + i * step);
+  const c = new THREE.Color(), C = (h) => new THREE.Color(h);
+  const f1 = C(0x8aa04e), f2 = C(0xb5ad62), f3 = C(0x6d8c46), f4 = C(0x9c8a5c), mead = C(0x6f9448), forest = C(0x3f6238), alp = C(0x8a8f58), rock = C(0x807b72), snow = C(0xf2f4f6), water = C(0x2f5f7c);
+  k = 0;
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++, k++) {
+    const e = D.e0 + i * step, n = D.n0 + j * step, h = hh[k];
+    pos[k * 3] = e; pos[k * 3 + 1] = h; pos[k * 3 + 2] = -n; uv[k * 2] = e / 90; uv[k * 2 + 1] = n / 90;
+    const i0 = Math.max(i - 1, 0), i1 = Math.min(i + 1, nx - 1), j0 = Math.max(j - 1, 0), j1 = Math.min(j + 1, nz - 1);
+    const sl = Math.hypot(hh[j * nx + i1] - hh[j * nx + i0], hh[j1 * nx + i] - hh[j0 * nx + i]) / (2 * step);
+    const p1 = fbm(e / 420 + 3, n / 420 + 8, 2), p2 = fbm(e / 150 + 31, n / 150 + 17, 2), p3 = fbm(e / 900, n / 900, 3);
+    if (h < 380 && sl < 0.12) { const q = Math.floor(p2 * 9) % 4; c.copy(q === 0 ? f1 : q === 1 ? f2 : q === 2 ? f3 : f4); if (p1 > 0.58) c.lerp(forest, 0.75); }
+    else if (h < 1750) { c.copy(mead); const fo = Math.min(1, Math.max(0, (sl - 0.12) * 5 + (p1 - 0.45) * 3)); c.lerp(forest, fo); if (h > 1450) c.lerp(alp, (h - 1450) / 300 * (1 - fo * 0.5)); }
+    else c.copy(alp).lerp(rock, Math.min(1, (h - 1750) / 600));
+    if (sl > 0.75 && h > 500) c.lerp(rock, Math.min(1, (sl - 0.75) * 3));
+    if (h > 2250 + 250 * (p3 - 0.5)) c.lerp(snow, Math.min(1, (h - 2250) / 250 + 0.3));
+    if (h > 400 && sl < 0.004 && Math.hypot(n + 56400, e + 1800) < 1500) c.copy(water);                          // lac de Bious-Artigues
+    const shd = 0.86 + 0.28 * p2;
+    col[k * 3] = c.r * shd; col[k * 3 + 1] = c.g * shd; col[k * 3 + 2] = c.b * shd;
+  }
+  const idx = new Uint32Array((nx - 1) * (nz - 1) * 6); k = 0;
+  for (let j = 0; j < nz - 1; j++) for (let i = 0; i < nx - 1; i++) { const a = j * nx + i, b = a + 1, d2 = a + nx, e2 = d2 + 1; idx[k++] = a; idx[k++] = b; idx[k++] = d2; idx[k++] = b; idx[k++] = e2; idx[k++] = d2; }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('color', new THREE.BufferAttribute(col, 3)); g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  g.setIndex(new THREE.BufferAttribute(idx, 1)); g.computeVertexNormals();
+  const tex = canvasTex(512, 512, (x, w, h) => { x.fillStyle = '#c8c8c8'; x.fillRect(0, 0, w, h); speckle(x, w, h, 5000, ['#b4b4b4', '#d8d8d8', '#bebebe', '#e2e2e2', '#a8a8a8'], 2, 9); speckle(x, w, h, 500, ['#9c9c9c', '#eeeeee'], 6, 22); }, { repeat: true });
+  const m = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true, map: tex })); m.receiveShadow = true;
+  return m;
+}
+function buildPau(g) {
+  g.add(buildPauTerrain());
+  const base = new THREE.Mesh(new THREE.PlaneGeometry(400000, 400000), new THREE.MeshLambertMaterial({ color: 0x7c9150 })); base.rotation.x = -Math.PI / 2; base.position.y = 95; g.add(base);
+  const ap = buildAirport(g, { alt: PAU.fieldAlt, rw: { ...PAU.runway, a: '13', b: '31' }, taxi: false });
+  const socks = [ap.sock], rnd = mulberry(777), dummy = new THREE.Object3D(), tc = new THREE.Color();
+  // zones de poser : marquage H, manche à air, bivouac
+  const hTex = canvasTex(256, 256, (x, w, h) => {
+    x.clearRect(0, 0, w, h); x.strokeStyle = '#f5d000'; x.lineWidth = 12; x.beginPath(); x.arc(w / 2, h / 2, 112, 0, 6.3); x.stroke();
+    x.fillStyle = '#ffffff'; x.fillRect(78, 62, 22, 132); x.fillRect(156, 62, 22, 132); x.fillRect(78, 117, 100, 22);
+  });
+  for (const id in MISSIONS) {
+    const z = MISSIONS[id].lz; if (!z) continue; const h = terrainH(z.n, z.e);
+    const pad = new THREE.Mesh(new THREE.PlaneGeometry(30, 30), new THREE.MeshLambertMaterial({ map: hTex, transparent: true, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 }));
+    pad.rotation.x = -Math.PI / 2; pad.position.set(z.e, h + 0.08, -z.n); pad.receiveShadow = true; g.add(pad);
+    const sk = ap.makeSock(); sk.position.set(z.e + 32, h, -z.n + 20); g.add(sk); socks.push(sk);
+    const tent = new THREE.MeshLambertMaterial({ color: 0x4f5a3a }), truck = new THREE.MeshLambertMaterial({ color: 0x3f4a34 });
+    for (let i = 0; i < 3; i++) { const t = new THREE.Mesh(new THREE.ConeGeometry(4, 3, 4), tent); t.rotation.y = Math.PI / 4; t.position.set(z.e - 38 - i * 9, h + 1.5, -z.n - 30); t.castShadow = true; g.add(t); }
+    for (let i = 0; i < 2; i++) { const t = new THREE.Mesh(new THREE.BoxGeometry(2.5, 2.6, 6.5), truck); t.position.set(z.e - 40, h + 1.3, -z.n + 28 + i * 5); t.rotation.y = 0.3; t.castShadow = true; g.add(t); }
+    const fum = new THREE.Mesh(new THREE.ConeGeometry(2.2, 14, 8, 1, true), new THREE.MeshBasicMaterial({ color: 0xff7a1a, transparent: true, opacity: 0.55, depthWrite: false })); fum.rotation.x = Math.PI; fum.position.set(z.e + 24, h + 7, -z.n - 24); g.add(fum);
+  }
+  // villages
+  const total = PAU.towns.reduce((a, t) => a + t[4], 0);
+  const hg = new THREE.BoxGeometry(10, 6, 8); hg.translate(0, 3, 0);
+  const rg = new THREE.ConeGeometry(8.2, 3.4, 4); rg.rotateY(Math.PI / 4); rg.scale(1, 1, 0.8); rg.translate(0, 7.6, 0);
+  const houses = new THREE.InstancedMesh(hg, new THREE.MeshLambertMaterial({ color: 0xe6dfcf }), total), roofs = new THREE.InstancedMesh(rg, new THREE.MeshLambertMaterial({ color: 0x5b6470 }), total);
+  let k = 0;
+  for (const [name, tn0, te0, rad, cnt] of PAU.towns) {
+    const w = waypoint(name), tn = w ? w[0] : tn0, te = w ? w[1] : te0;
+    for (let i = 0; i < cnt; i++) {
+      const a = rnd() * 6.28, r = Math.sqrt(rnd()) * rad, n = tn + r * Math.cos(a), e = te + r * Math.sin(a), h = terrainH(n, e);
+      const s = 0.8 + rnd() * 0.8; dummy.position.set(e, h - 0.4, -n); dummy.scale.set(s, s, s); dummy.rotation.set(0, Math.round(rnd() * 4) * 0.4 + rnd() * 0.2, 0); dummy.updateMatrix();
+      houses.setMatrixAt(k, dummy.matrix); roofs.setMatrixAt(k, dummy.matrix); k++;
+    }
+  }
+  houses.count = roofs.count = k; g.add(houses, roofs);
+  // arbres le long du couloir de vol (repères de hauteur en vol tactique)
+  const legs = []; for (const id in MISSIONS) { const m = MISSIONS[id]; if (!m.route) continue; let p = [0, 0]; for (const w of [...m.route.map(waypoint), [m.lz.n, m.lz.e]]) { legs.push([p, w]); p = w; } }
+  const NT = 22000, tg = new THREE.ConeGeometry(4, 13, 6); tg.translate(0, 7.5, 0);
+  const trees = new THREE.InstancedMesh(tg, new THREE.MeshLambertMaterial({ color: 0xffffff }), NT);
+  k = 0; let tries = 0;
+  while (k < NT && tries++ < NT * 12) {
+    const [a, b] = legs[(rnd() * legs.length) | 0], t = rnd(), w = (rnd() + rnd() - 1) * 2600;
+    const dn = b[0] - a[0], de = b[1] - a[1], l = Math.hypot(dn, de) || 1;
+    const n = a[0] + dn * t - de / l * w, e = a[1] + de * t + dn / l * w, h = terrainH(n, e);
+    if (h > 1800 || Math.hypot(n, e) < 900) continue;
+    const sl = Math.abs(terrainH(n + 40, e) - h) + Math.abs(terrainH(n, e + 40) - h);
+    const p1 = fbm(e / 420 + 3, n / 420 + 8, 2);
+    if (h < 380 ? p1 < 0.56 : (sl < 5 && p1 < 0.5)) continue;
+    if (sl > 45) continue;
+    const s = 0.7 + rnd() * 0.8; dummy.position.set(e, h - 0.6, -n); dummy.scale.set(s, s * (0.8 + rnd() * 0.5), s); dummy.rotation.set(0, rnd() * 6, 0); dummy.updateMatrix();
+    trees.setMatrixAt(k, dummy.matrix); tc.setHSL(0.27 + rnd() * 0.07, 0.42, 0.19 + rnd() * 0.1); trees.setColorAt(k, tc); k++;
+  }
+  trees.count = k; g.add(trees);
+  return { socks };
+}
 
 // ---------------------------------------------------------------- BPC (type Mistral)
 function buildShip() {
@@ -310,12 +402,7 @@ function buildShip() {
 // ---------------------------------------------------------------- monde
 export class World {
   constructor(scene, renderer) {
-    this.scene = scene;
-    this.terrain = buildTerrain(); scene.add(this.terrain);
-    this.sea = buildSea(); scene.add(this.sea);
-    const ap = buildAirport(scene); this.sock = ap.sock;
-    buildScatter(scene);
-    this.ship = buildShip(); this.ship.rotation.order = 'YXZ'; scene.add(this.ship);
+    this.scene = scene; this.groups = {}; this.socks = [];
     // ciel + éclairage
     this.sky = new Sky(); this.sky.scale.setScalar(70000); scene.add(this.sky);
     this.sun = new THREE.DirectionalLight(0xffffff, 2.6);
@@ -332,6 +419,21 @@ export class World {
     this.caps = new THREE.Points(cg, new THREE.PointsMaterial({ color: 0xffffff, size: 2.6, sizeAttenuation: true, transparent: true, opacity: 0.6, depthWrite: false }));
     this.caps.frustumCulled = false; scene.add(this.caps);
     this.sunDir = new THREE.Vector3();
+  }
+
+  // construit (à la première demande) et affiche le théâtre voulu : 'mer' ou 'pau'
+  setTheatre(id) {
+    setTheatre(id);
+    if (!this.groups[id]) {
+      const g = this.groups[id] = new THREE.Group(); this.scene.add(g);
+      if (id === 'mer') {
+        g.add(buildTerrain()); this.sea = buildSea(); g.add(this.sea);
+        g.userData.socks = [buildAirport(g).sock]; buildScatter(g);
+        this.ship = buildShip(); this.ship.rotation.order = 'YXZ'; g.add(this.ship);
+      } else g.userData.socks = buildPau(g).socks;
+    }
+    for (const k in this.groups) this.groups[k].visible = k === id;
+    this.socks = this.groups[id].userData.socks; this.th = id; this.caps.visible = id === 'mer';
   }
 
   applyConfig(cfg) {
@@ -351,27 +453,32 @@ export class World {
   }
 
   update(dt, env, camPos, heliPos) {
-    const S = env.ship, sg = this.ship;
-    sg.position.set(S.e, S.heave, -S.n); sg.rotation.set(S.pitch, -S.psi, -S.roll);
-    sg.userData.radar.rotation.y += dt * 2.2;
-    // mer : défilement des vagues dans le sens du vent
-    const o = this.sea.userData.nm.offset, wd = this.windDir + Math.PI;
-    o.x += Math.sin(wd) * dt * 0.035; o.y += Math.cos(wd) * dt * 0.035;
-    this.sea.position.set(Math.round(camPos.x / 6000) * 6000, 0, Math.round(camPos.z / 6000) * 6000);
-    // moutons : pavage périodique centré sur la caméra, dérivant lentement avec le vent
-    const p = this.caps.geometry.attributes.position, L = 2400, t = env.t;
-    const dx = Math.sin(wd) * t * 2.5, dz = -Math.cos(wd) * t * 2.5;
-    for (let i = 0; i < p.count; i++) {
-      const bx = this.capBase[i * 2] + dx, bz = this.capBase[i * 2 + 1] + dz;
-      const x = bx + Math.floor((camPos.x - bx) / L + 0.5) * L, z = bz + Math.floor((camPos.z - bz) / L + 0.5) * L;
-      p.array[i * 3] = x; p.array[i * 3 + 2] = z;
-      p.array[i * 3 + 1] = terrainH(-z, x) > -1.5 ? -50 : 0.35;
+    const wd = this.windDir + Math.PI;
+    if (this.th === 'mer') {
+      const S = env.ship, sg = this.ship;
+      sg.position.set(S.e, S.heave, -S.n); sg.rotation.set(S.pitch, -S.psi, -S.roll);
+      sg.userData.radar.rotation.y += dt * 2.2;
+      // mer : défilement des vagues dans le sens du vent
+      const o = this.sea.userData.nm.offset;
+      o.x += Math.sin(wd) * dt * 0.035; o.y += Math.cos(wd) * dt * 0.035;
+      this.sea.position.set(Math.round(camPos.x / 6000) * 6000, 0, Math.round(camPos.z / 6000) * 6000);
+      // moutons : pavage périodique centré sur la caméra, dérivant lentement avec le vent
+      const p = this.caps.geometry.attributes.position, L = 2400, t = env.t;
+      const dx = Math.sin(wd) * t * 2.5, dz = -Math.cos(wd) * t * 2.5;
+      for (let i = 0; i < p.count; i++) {
+        const bx = this.capBase[i * 2] + dx, bz = this.capBase[i * 2 + 1] + dz;
+        const x = bx + Math.floor((camPos.x - bx) / L + 0.5) * L, z = bz + Math.floor((camPos.z - bz) / L + 0.5) * L;
+        p.array[i * 3] = x; p.array[i * 3 + 2] = z;
+        p.array[i * 3 + 1] = terrainH(-z, x) > -1.5 ? -50 : 0.35;
+      }
+      p.needsUpdate = true;
     }
-    p.needsUpdate = true;
-    // manche à air
-    const w = env.wind, spd = Math.hypot(w[0], w[1]);
-    this.sock.rotation.y = Math.atan2(w[1], -w[0]);       // le cône (axe +Z local) pointe sous le vent
-    this.sock.userData.cone.rotation.x = Math.max(0, 1.25 - spd / 7.5) + 0.04 * Math.sin(env.t * 9);
+    // manches à air
+    const w = env.meanWind, spd = Math.hypot(w[0], w[1]);
+    for (const sk of this.socks) {
+      sk.rotation.y = Math.atan2(w[1], -w[0]);            // le cône (axe +Z local) pointe sous le vent
+      sk.userData.cone.rotation.x = Math.max(0, 1.25 - spd / 7.5) + 0.04 * Math.sin(env.t * 9);
+    }
     // soleil / ombres centrés sur l'hélicoptère
     this.sun.position.copy(heliPos).addScaledVector(this.sunDir, 300); this.sun.target.position.copy(heliPos);
     this.sky.position.copy(camPos);

@@ -1,8 +1,8 @@
 // ============================================================================
 // Écrans multifonctions (512 x 512) dessinés en Canvas 2D :
-//  PFD (pilotage), ND (navigation), ENG (moteurs / commandes), HOV (stationnaire / appontage)
+//  PFD (pilotage), SITAC (situation tactique / navigation), ENG (moteurs / commandes), HOV (stationnaire / appontage)
 // ============================================================================
-import { coastN, SHIP, RUNWAY, deckHalfWidth } from './env.js';
+import { SHIP, deckHalfWidth } from './env.js';
 const D2R = Math.PI / 180, W = 512;
 const GREEN = '#35e06a', CYAN = '#4fd8ff', AMBER = '#ffb020', RED = '#ff4a3a', WHITE = '#f0f4f6', MAG = '#ff5cf0', GREY = '#8a949c';
 const pad3 = (v) => String(Math.round(((v % 360) + 360) % 360) || 360).padStart(3, '0');
@@ -107,57 +107,96 @@ function bar(g, x, y, w, label, v, min, max, zones, unit) {
   txt(g, `${Math.round(v)}${unit}`, x + w, y + 34, col, 'bold 22px sans-serif', 'right');
 }
 
-// ---------------------------------------------------------------- ND (carte, cap en haut)
-export function drawND(g, s) {
-  frame(g, 'NAV');
-  const cx = 256, cy = 330, R = 250, rng = s.tgtDist > 4 ? 10 : s.tgtDist > 1.6 ? 5 : 2;      // NM au rayon
+// ---------------------------------------------------------------- SITAC (situation tactique, cap en haut)
+// fond de carte : relief ombré (teintes hypsométriques), généré une fois par théâtre
+export function buildRelief(B, hFn) {
+  const w = Math.round((B.e1 - B.e0) / B.step), h = Math.round((B.n1 - B.n0) / B.step);
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g = c.getContext('2d'), img = g.createImageData(w, h), H = new Float32Array((w + 1) * (h + 1));
+  for (let j = 0; j <= h; j++) for (let i = 0; i <= w; i++) H[j * (w + 1) + i] = hFn(B.n1 - j * B.step, B.e0 + i * B.step);
+  const ramp = [[0, 38, 62, 36], [300, 58, 80, 42], [800, 84, 92, 52], [1500, 108, 98, 70], [2200, 128, 122, 112], [3000, 205, 210, 215]];
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+    const a = H[j * (w + 1) + i], dx = H[j * (w + 1) + i + 1] - a, dy = H[(j + 1) * (w + 1) + i] - a, o = (j * w + i) * 4;
+    if (a <= 0) { img.data[o] = 12; img.data[o + 1] = 34; img.data[o + 2] = 54; img.data[o + 3] = 255; continue; }
+    let k = 0; while (k < ramp.length - 2 && a > ramp[k + 1][0]) k++;
+    const t = Math.max(0, Math.min(1, (a - ramp[k][0]) / (ramp[k + 1][0] - ramp[k][0])));
+    const sh = Math.max(0.45, Math.min(1.6, 1 + (dx - dy) / B.step * 1.3));          // éclairage nord-ouest
+    for (let q = 0; q < 3; q++) img.data[o + q] = Math.min(255, (ramp[k][q + 1] + (ramp[k + 1][q + 1] - ramp[k][q + 1]) * t) * sh);
+    img.data[o + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  return { img: c, ...B };
+}
+export function drawSITAC(g, s) {
+  frame(g, 'SITAC');
+  const cx = 256, cy = 318, R = 236, rng = s.rng, m = s.map;
   const ppm = R / (rng * 1852), ch = Math.cos(s.hdg * D2R), sh = Math.sin(s.hdg * D2R);
   const P = (n, e) => { const dn = n - s.n, de = e - s.e; return [cx + (de * ch - dn * sh) * ppm, cy - (dn * ch + de * sh) * ppm]; };
   g.save(); g.beginPath(); g.rect(0, 24, W, W - 24); g.clip();
-  // terre
-  g.fillStyle = '#243a22'; g.beginPath();
-  let first = true; for (let e = -9000; e <= 9000; e += 150) { const [x, y] = P(coastN(e), e); if (first) { g.moveTo(x, y); first = false; } else g.lineTo(x, y); }
-  let p = P(9000, 9000); g.lineTo(p[0], p[1]); p = P(9000, -9000); g.lineTo(p[0], p[1]); g.closePath(); g.fill();
-  g.strokeStyle = '#5c8a52'; g.lineWidth = 1.5; g.stroke();
-  let q = P(-2600, -1500); g.fillStyle = '#243a22'; g.beginPath(); g.arc(q[0], q[1], Math.max(2, 170 * ppm), 0, 6.3); g.fill();
-  // piste, hélisurface
-  g.strokeStyle = WHITE; g.lineWidth = 3; let a = P(RUNWAY.n, RUNWAY.e - RUNWAY.len / 2), b = P(RUNWAY.n, RUNWAY.e + RUNWAY.len / 2); g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
-  q = P(0, 0); g.strokeStyle = CYAN; g.lineWidth = 2; g.beginPath(); g.arc(q[0], q[1], 7, 0, 6.3); g.stroke(); txt(g, 'H', q[0], q[1] + 1, CYAN, 'bold 11px sans-serif');
+  if (m) { g.save(); g.translate(cx, cy); g.rotate(-s.hdg * D2R); g.scale(ppm, ppm); g.translate(-s.e, s.n); g.imageSmoothingEnabled = true; g.drawImage(m.img, m.e0, -m.n1, m.e1 - m.e0, m.n1 - m.n0); g.restore(); }
   // anneaux de distance
-  g.strokeStyle = '#4a545c'; g.lineWidth = 1; g.setLineDash([4, 6]);
+  g.strokeStyle = 'rgba(210,220,228,0.45)'; g.lineWidth = 1; g.setLineDash([4, 6]);
   for (const f of [0.5, 1]) { g.beginPath(); g.arc(cx, cy, R * f, 0, 6.3); g.stroke(); }
-  g.setLineDash([]); txt(g, `${rng / 2}`, cx + R / 2 * 0.71 + 10, cy - R / 2 * 0.71, GREY, '13px sans-serif'); txt(g, `${rng} NM`, cx + R * 0.71 - 4, cy - R * 0.71 + 14, GREY, '13px sans-serif');
-  // navire
-  const S = s.ship; q = P(S.n, S.e);
-  g.save(); g.translate(q[0], q[1]); g.rotate(S.psi - s.hdg * D2R);
-  const sl = Math.max(9, 100 * ppm), sw = Math.max(3.5, 16 * ppm);
-  g.fillStyle = MAG; g.beginPath(); g.moveTo(0, -sl - sw); g.lineTo(sw, -sl * 0.5); g.lineTo(sw, sl); g.lineTo(-sw, sl); g.lineTo(-sw, -sl * 0.5); g.closePath(); g.fill();
-  g.strokeStyle = MAG; g.lineWidth = 1.5; g.setLineDash([5, 4]); g.beginPath(); g.moveTo(0, -sl); g.lineTo(0, -sl - S.v * 360 * ppm); g.stroke(); g.setLineDash([]);   // route à 6 min
+  g.setLineDash([]); txt(g, `${rng / 2}`, cx + R / 2 * 0.71 + 10, cy - R / 2 * 0.71, WHITE, '13px sans-serif'); txt(g, `${rng} NM`, cx + R * 0.71 - 6, cy - R * 0.71 + 14, WHITE, '13px sans-serif');
+  // trace parcourue
+  g.strokeStyle = 'rgba(255,255,255,0.75)'; g.lineWidth = 1.5; g.setLineDash([2, 4]); g.beginPath();
+  s.trail.forEach((t, i) => { const [x, y] = P(t[0], t[1]); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.lineTo(cx, cy); g.stroke(); g.setLineDash([]);
+  // plan de vol : branches, points tournants, point de poser
+  const pl = s.plan;
+  for (let i = 1; i < pl.length; i++) {
+    const a = P(pl[i - 1].n, pl[i - 1].e), b = P(pl[i].n, pl[i].e);
+    g.strokeStyle = i === s.wpI ? MAG : i < s.wpI ? 'rgba(255,92,240,0.35)' : '#ffffff'; g.lineWidth = i === s.wpI ? 3.5 : 2;
+    g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
+  }
+  pl.forEach((p, i) => {
+    const [x, y] = P(p.n, p.e), col = i === s.wpI ? MAG : i < s.wpI ? 'rgba(255,92,240,0.5)' : WHITE;
+    if (p.land && s.ship) return;
+    g.strokeStyle = col; g.fillStyle = '#05080a'; g.lineWidth = 2.5;
+    if (p.land) { g.beginPath(); g.arc(x, y, 11, 0, 6.3); g.fill(); g.stroke(); txt(g, 'H', x, y + 1, col, 'bold 14px sans-serif'); }
+    else if (i === 0) { g.strokeRect(x - 6, y - 6, 12, 12); }
+    else { g.beginPath(); g.moveTo(x, y - 8); g.lineTo(x + 8, y); g.lineTo(x, y + 8); g.lineTo(x - 8, y); g.closePath(); g.fill(); g.stroke(); }
+    g.lineWidth = 3; g.strokeStyle = '#05080a'; g.font = 'bold 14px sans-serif'; g.textAlign = 'left'; g.strokeText(p.name, x + 13, y - 10); txt(g, p.name, x + 13, y - 10, col, 'bold 14px sans-serif', 'left');
+  });
+  // navire (point de poser mobile) avec sa route à 6 min
+  if (s.ship) {
+    const S = s.ship, q = P(S.n, S.e);
+    g.save(); g.translate(q[0], q[1]); g.rotate(S.psi - s.hdg * D2R);
+    const sl = Math.max(9, 100 * ppm), sw = Math.max(3.5, 16 * ppm);
+    g.fillStyle = MAG; g.strokeStyle = '#05080a'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(0, -sl - sw); g.lineTo(sw, -sl * 0.5); g.lineTo(sw, sl); g.lineTo(-sw, sl); g.lineTo(-sw, -sl * 0.5); g.closePath(); g.fill(); g.stroke();
+    g.strokeStyle = MAG; g.setLineDash([5, 4]); g.beginPath(); g.moveTo(0, -sl); g.lineTo(0, -sl - S.v * 360 * ppm); g.stroke(); g.setLineDash([]);
+    g.restore();
+    g.lineWidth = 3; g.strokeStyle = '#05080a'; g.font = 'bold 14px sans-serif'; g.textAlign = 'left'; g.strokeText('BPC', q[0] + 16, q[1] - 14); txt(g, 'BPC', q[0] + 16, q[1] - 14, MAG, 'bold 14px sans-serif', 'left');
+  }
   g.restore();
-  g.strokeStyle = MAG; g.lineWidth = 1.5; g.beginPath(); g.moveTo(cx, cy); g.lineTo(q[0], q[1]); g.stroke();
-  txt(g, 'BPC', q[0] + 16, q[1] - 14, MAG, 'bold 14px sans-serif', 'left');
-  g.restore();
-  // rose des caps
+  // rose des caps, maquette, vecteur route (1 min)
   g.save(); g.translate(cx, cy); g.strokeStyle = WHITE; g.fillStyle = WHITE; g.font = 'bold 15px sans-serif'; g.lineWidth = 1.5;
   for (let h = 0; h < 360; h += 10) {
     g.save(); g.rotate((h - s.hdg) * D2R); g.beginPath(); g.moveTo(0, -R); g.lineTo(0, -R + (h % 30 === 0 ? 14 : 8)); g.stroke();
     if (h % 30 === 0) g.fillText(h === 0 ? 'N' : String(h / 10), 0, -R + 26); g.restore();
   }
-  // maquette
+  const tr = (s.trk - s.hdg) * D2R, tl = s.gs * 0.5144 * 60 * ppm; g.strokeStyle = GREEN; g.lineWidth = 2; g.beginPath(); g.moveTo(0, 0); g.lineTo(Math.sin(tr) * tl, -Math.cos(tr) * tl); g.stroke();
+  g.strokeStyle = '#05080a'; g.lineWidth = 6; g.beginPath(); g.moveTo(0, -14); g.lineTo(0, 16); g.moveTo(-10, 0); g.lineTo(10, 0); g.stroke();
   g.strokeStyle = AMBER; g.lineWidth = 3; g.beginPath(); g.moveTo(0, -14); g.lineTo(0, 16); g.moveTo(-10, 0); g.lineTo(10, 0); g.moveTo(-5, 14); g.lineTo(5, 14); g.stroke();
-  // vecteur route (1 min)
-  const tr = (s.trk - s.hdg) * D2R, tl = s.gs * 0.5144 * 60 * ppm; g.strokeStyle = GREEN; g.lineWidth = 1.5; g.beginPath(); g.moveTo(0, 0); g.lineTo(Math.sin(tr) * tl, -Math.cos(tr) * tl); g.stroke();
   g.restore();
   // vent
-  g.save(); g.translate(46, 70); g.rotate((s.windDir - s.hdg + 180) * D2R); g.strokeStyle = CYAN; g.fillStyle = CYAN; g.lineWidth = 3;
+  g.fillStyle = 'rgba(5,8,10,0.78)'; g.fillRect(4, 28, 150, 96);
+  g.save(); g.translate(34, 66); g.rotate((s.windDir - s.hdg + 180) * D2R); g.strokeStyle = CYAN; g.fillStyle = CYAN; g.lineWidth = 3;
   g.beginPath(); g.moveTo(0, 18); g.lineTo(0, -14); g.stroke(); g.beginPath(); g.moveTo(0, -22); g.lineTo(-7, -8); g.lineTo(7, -8); g.closePath(); g.fill(); g.restore();
-  txt(g, `${pad3(s.windDir)}° / ${Math.round(s.windKt)} kt`, 14, 110, CYAN, 'bold 15px sans-serif', 'left');
-  // bloc cible
-  g.fillStyle = 'rgba(5,8,10,0.8)'; g.fillRect(330, 28, 178, 72);
-  txt(g, s.tgtName, 338, 42, MAG, 'bold 16px sans-serif', 'left'); txt(g, `${pad3(s.tgtBrg)}°  ${s.tgtDist.toFixed(2)} NM`, 338, 64, MAG, 'bold 18px sans-serif', 'left');
-  const eta = s.gs > 15 ? s.tgtDist / s.gs * 60 : null; txt(g, eta ? `ETE ${Math.floor(eta)} min ${String(Math.round((eta % 1) * 60)).padStart(2, '0')}` : 'ETE --', 338, 86, WHITE, '15px sans-serif', 'left');
-  txt(g, `BPC cap ${pad3(S.psi / D2R)}° ${Math.round(S.v / 0.5144)} kt`, 14, 496, MAG, 'bold 15px sans-serif', 'left');
-  txt(g, `GS ${Math.round(s.gs)} kt  TRK ${pad3(s.trk)}°`, 498, 496, GREEN, 'bold 15px sans-serif', 'right');
+  txt(g, 'VENT', 66, 52, CYAN, 'bold 13px sans-serif', 'left'); txt(g, `${pad3(s.windDir)}°/${Math.round(s.windKt)} kt`, 66, 72, CYAN, 'bold 15px sans-serif', 'left');
+  txt(g, `H. SOL ${Math.round(s.ra / 10) * 10} ft`, 12, 108, s.ra < 100 ? AMBER : GREEN, 'bold 15px sans-serif', 'left');
+  // bloc navigation : point actif, écart de route, point suivant
+  const wp = pl[s.wpI], nx = pl[s.wpI + 1];
+  g.fillStyle = 'rgba(5,8,10,0.78)'; g.fillRect(318, 28, 190, 116);
+  txt(g, `► ${wp.name}`, 326, 42, MAG, 'bold 16px sans-serif', 'left'); txt(g, `${pad3(s.tgtBrg)}°   ${s.tgtDist.toFixed(s.tgtDist < 10 ? 2 : 1)} NM`, 326, 64, MAG, 'bold 18px sans-serif', 'left');
+  const eta = s.gs > 15 ? s.tgtDist / s.gs * 60 : null; txt(g, eta ? `ETE ${Math.floor(eta)} min ${String(Math.floor((eta % 1) * 60)).padStart(2, '0')}` : 'ETE --', 326, 86, WHITE, '15px sans-serif', 'left');
+  const xa = Math.abs(s.xtk); txt(g, `ÉCART ${xa < 1000 ? Math.round(xa / 10) * 10 + ' m' : (xa / 1852).toFixed(1) + ' NM'} ${xa < 30 ? '' : s.xtk > 0 ? 'À DROITE' : 'À GAUCHE'}`, 326, 108, xa > 500 ? AMBER : GREEN, 'bold 14px sans-serif', 'left');
+  txt(g, nx ? `puis ${nx.name}` : 'POINT DE POSER', 326, 130, GREY, '14px sans-serif', 'left');
+  // barre d'écart de route (CDI) : pleine échelle ± 0,5 NM
+  const dx = Math.max(-1, Math.min(1, -s.xtk / 926)) * 80; g.strokeStyle = WHITE; g.lineWidth = 1; g.strokeRect(cx - 82, 478, 164, 12);
+  for (const d of [-80, -40, 40, 80]) { g.beginPath(); g.arc(cx + d, 484, 2, 0, 6.3); g.stroke(); }
+  g.fillStyle = MAG; g.fillRect(cx + dx - 3, 474, 6, 20); g.fillStyle = AMBER; g.fillRect(cx - 1, 474, 2, 20);
+  txt(g, s.ship ? `BPC ${pad3(s.ship.psi / D2R)}°/${Math.round(s.ship.v / 0.5144)} kt` : `ALT POSER ${Math.round(s.lzAlt * 3.281 / 10) * 10} ft`, 10, 496, MAG, 'bold 14px sans-serif', 'left');
+  txt(g, `GS ${Math.round(s.gs)}  TRK ${pad3(s.trk)}°`, 502, 496, GREEN, 'bold 14px sans-serif', 'right');
 }
 
 // ---------------------------------------------------------------- ENG / commandes de vol
@@ -246,7 +285,7 @@ export function drawHOV(g, s) {
   g.fillStyle = hf < 10 ? AMBER : GREEN; g.fillRect(bx + 2, by + bh - hf / hmax * bh, 22, hf / hmax * bh);
   txt(g, 'ft', bx + 13, by - 12, CYAN, 'bold 13px sans-serif'); txt(g, String(Math.round(h.hgt * 3.281)), bx + 13, by + bh + 16, WHITE, 'bold 18px sans-serif');
   // textes
-  txt(g, h.kind === 'deck' ? `SPOT ${h.spot.id}` : 'HÉLISURFACE', 18, 40, MAG, 'bold 16px sans-serif', 'left');
+  txt(g, h.kind === 'deck' ? `SPOT ${h.spot.id}` : h.name, 18, 40, MAG, 'bold 16px sans-serif', 'left');
   txt(g, `${Math.abs(h.dx).toFixed(dist < 50 ? 1 : 0)} m ${h.dx >= 0 ? 'DEVANT' : 'DERRIÈRE'}`, 18, 62, WHITE, 'bold 16px sans-serif', 'left');
   txt(g, `${Math.abs(h.dy).toFixed(dist < 50 ? 1 : 0)} m ${h.dy >= 0 ? 'À DROITE' : 'À GAUCHE'}`, 18, 82, WHITE, 'bold 16px sans-serif', 'left');
   txt(g, `V rel ${(Math.hypot(h.vx, h.vy) * 1.944).toFixed(1)} kt`, 18, 478, GREEN, 'bold 16px sans-serif', 'left');

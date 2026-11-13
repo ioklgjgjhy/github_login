@@ -26,7 +26,7 @@ export function deckHalfWidth(f) {
   const t = (f - 62) / 37.5; return 16 * (1 - 0.72 * t * t);
 }
 // bâtiments de l'aérodrome : centre (n,e), dimensions, hauteur (pour le rendu et les collisions)
-export const BUILDINGS = [
+const BUILD_MER = [
   { n: 25, e: -175, dn: 46, de: 60, h: 13, kind: 'hangar' },
   { n: -40, e: -175, dn: 46, de: 60, h: 13, kind: 'hangar' },
   { n: 95, e: -160, dn: 22, de: 70, h: 7, kind: 'terminal' },
@@ -34,6 +34,64 @@ export const BUILDINGS = [
   { n: -1060, e: -2300, dn: 7, de: 7, h: 32, kind: 'lighthouse' },
 ];
 export const RUNWAY = { n: 190, e: -100, len: 1400, wid: 40 };   // piste 09/27
+
+// ============================ théâtre « Pyrénées » : Pau-Uzein -> vallée d'Ossau (relief réel, maille 100 m)
+export const PAU = {
+  fieldAlt: 185,
+  runway: { n: 500, e: 477, hdg: 128, len: 2500, wid: 45 },     // piste 13/31 de Pau-Pyrénées
+  buildings: [
+    { n: 25, e: -175, dn: 46, de: 60, h: 13, kind: 'hangar' }, { n: -40, e: -175, dn: 46, de: 60, h: 13, kind: 'hangar' },
+    { n: 95, e: -160, dn: 22, de: 70, h: 7, kind: 'terminal' }, { n: 300, e: 150, dn: 9, de: 9, h: 24, kind: 'tower' },
+  ],
+  towns: [['PAU', -8600, 4400, 1500, 260], ['GAN', -16400, 2950, 420, 90], ['REBENACQ', -24170, 2140, 260, 50], ['ARUDY', -29950, -280, 420, 90],
+    ['BIELLE', -35620, -450, 260, 50], ['LARUNS', -43060, -120, 420, 90], ['EAUX-CHAUDES', -47060, -1090, 120, 18], ['GABAS', -53730, -280, 120, 18], ['UZEIN', 1500, -2300, 300, 50]],
+};
+const WPT = { GAN: [-16400, 2950], REBENACQ: [-24170, 2140], ARUDY: [-29950, -280], BIELLE: [-35620, -450], LARUNS: [-43060, -120], 'EAUX-CHAUDES': [-47060, -1090], GABAS: [-53730, -280] };
+export const MISSIONS = {
+  bpc: { theatre: 'mer', label: 'Marine — appontage sur BPC' },
+  benou: { theatre: 'pau', label: 'Terre — Pau → plateau du Bénou (877 m)', lz: { name: 'LZ BÉNOU', n: -34600, e: -3900 }, route: ['GAN', 'REBENACQ', 'ARUDY', 'BIELLE'] },
+  bious: { theatre: 'pau', label: 'Terre — Pau → Bious-Artigues (1 406 m, haute montagne)', lz: { name: 'LZ BIOUS', n: -56500, e: -2400 }, route: ['GAN', 'REBENACQ', 'ARUDY', 'LARUNS', 'EAUX-CHAUDES', 'GABAS'] },
+};
+let TH = 'mer';                       // théâtre actif
+let dem = null;                       // { nx, ny, n0, e0, step, h: Float32Array (ligne 0 = sud) }
+const flatZones = [];                 // zones aplanies (aires de poser) : { n, e, r0, r1, alt }
+export function setTheatre(id) { TH = id; }
+export function theatre() { return TH; }
+export function buildings() { return TH === 'pau' ? PAU.buildings : BUILD_MER; }
+export function fieldAlt() { return TH === 'pau' ? PAU.fieldAlt : FIELD_ALT; }
+export function hasDEM() { return !!dem; }
+function demRaw(n, e) {
+  const d = dem, x = clamp((e - d.e0) / d.step, 0, d.nx - 1.001), y = clamp((n - d.n0) / d.step, 0, d.ny - 1.001);
+  const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j, k = j * d.nx + i;
+  const a = d.h[k], b = d.h[k + 1], c = d.h[k + d.nx], dd = d.h[k + d.nx + 1];
+  return fx + fy <= 1 ? a + (b - a) * fx + (c - a) * fy : dd + (c - dd) * (1 - fx) + (b - dd) * (1 - fy);   // même découpage en triangles que le maillage
+}
+function pauH(n, e) {
+  if (!dem) return PAU.fieldAlt;
+  let h = demRaw(n, e);
+  // plate-forme de l'aérodrome : bande de piste + zone de l'hélisurface
+  if (n > -1500 && n < 3000 && Math.abs(e) < 3500) {
+    const r = PAU.runway, c = Math.cos(r.hdg * D2R), sn = Math.sin(r.hdg * D2R), dn = n - r.n, de = e - r.e;
+    const al = clamp(dn * c + de * sn, -r.len / 2 - 100, r.len / 2 + 100), dr = Math.hypot(dn - al * c, de - al * sn);
+    const w = Math.max(1 - sstep(dr, 120, 420), 1 - sstep(Math.hypot(n, e), 320, 650));
+    h += (PAU.fieldAlt - h) * w;
+  }
+  for (const z of flatZones) { const d = Math.hypot(n - z.n, e - z.e); if (d < z.r1) h += (z.alt - h) * (1 - sstep(d, z.r0, z.r1)); }
+  return h;
+}
+// installe le relief (appelé une fois l'image d'altitude décodée) ; recale les points tournants au fond des vallées
+export function installDEM(meta, heights) {
+  dem = { ...meta, h: heights };
+  for (const k in WPT) {
+    let best = WPT[k].slice(), bh = demRaw(best[0], best[1]);
+    for (let dn = -500; dn <= 500; dn += 100) for (let de = -500; de <= 500; de += 100) { const h = demRaw(WPT[k][0] + dn, WPT[k][1] + de); if (h < bh) { bh = h; best = [WPT[k][0] + dn, WPT[k][1] + de]; } }
+    WPT[k] = best;
+  }
+  flatZones.length = 0;
+  for (const id in MISSIONS) { const z = MISSIONS[id].lz; if (z) { z.h = demRaw(z.n, z.e); flatZones.push({ n: z.n, e: z.e, r0: 45, r1: 130, alt: z.h }); } }
+}
+export function terrainH(n, e) { return TH === 'pau' ? pauH(n, e) : coastH(n, e); }
+export function waypoint(name) { return WPT[name]; }
 
 // ---------- bruit déterministe ----------
 function hash(i, j) { let h = (i * 374761393 + j * 668265263) | 0; h = (h ^ (h >>> 13)) * 1274126177 | 0; return ((h ^ (h >>> 16)) >>> 0) / 4294967295; }
@@ -47,8 +105,8 @@ export function fbm(x, y, oct = 4) { let s = 0, a = 0.5, f = 1; for (let o = 0; 
 
 export const coastN = (e) => -520 + 130 * Math.sin(e / 900) + 55 * Math.sin(e / 310 + 1) - 520 * Math.exp(-(((e + 2300) / 420) ** 2)) + 250 * Math.exp(-(((e - 3400) / 900) ** 2));
 
-// altitude du terrain (m) ; négatif = fond marin
-export function terrainH(n, e) {
+// altitude du terrain côtier (m) ; négatif = fond marin
+function coastH(n, e) {
   const d = n - coastN(e);
   let h;
   if (d < 0) h = Math.max(-30, d * 0.08);
@@ -74,12 +132,15 @@ function gauss() { let u = 0; while (u === 0) u = Math.random(); return Math.sqr
 export const DEFAULT_CFG = {
   windDir: 240, windKt: 15, gustKt: 5, turb: 0.3, airwake: true,
   seaState: 3, shipHdg: 245, shipKt: 10, shipN: -4300, shipE: 2600,
-  spot: 5, visKm: 25, hour: 15, mass: 9800,
+  spot: 5, visKm: 25, hour: 15, mass: 9800, mission: 'bpc',
 };
 
 export class Environment {
   constructor(cfg = {}) {
     this.cfg = { ...DEFAULT_CFG, ...cfg };
+    this.mission = MISSIONS[this.cfg.mission] || MISSIONS.bpc;
+    this.hasShip = this.mission.theatre === 'mer';
+    setTheatre(this.mission.theatre);
     this.t = 0; this.rho = 1.225;
     this.wind = [0, 0, 0]; this.gustM = [0, 0, 0];
     this.g = [0, 0, 0]; this.gr = [0, 0, 0]; this.gs = 0; this.gd = 0;
@@ -100,8 +161,9 @@ export class Environment {
     const pitchD = ss * 0.22 * D2R * (0.8 * w3 * Math.cos(w3 * t + 0.6) + 0.3 * w5 * Math.cos(w5 * t));
     const heave = ss * 0.2 * (0.8 * Math.sin(w4 * t + 2.1) + 0.3 * Math.sin(w2 * t));
     const heaveD = ss * 0.2 * (0.8 * w4 * Math.cos(w4 * t + 2.1) + 0.3 * w2 * Math.cos(w2 * t));
+    const far = this.hasShip ? 0 : 1e7;       // pas de navire sur le théâtre terrestre
     return {
-      n: c.shipN + v * Math.cos(psi) * t, e: c.shipE + v * Math.sin(psi) * t, psi, v,
+      n: c.shipN + v * Math.cos(psi) * t - far, e: c.shipE + v * Math.sin(psi) * t, psi, v,
       vn: v * Math.cos(psi), ve: v * Math.sin(psi), cp: Math.cos(psi), sp: Math.sin(psi),
       roll, pitch, heave, rollD, pitchD, heaveD,
     };
@@ -115,6 +177,25 @@ export class Environment {
     const sp = SHIP.spots.find((x) => x.id === id) || SHIP.spots[4];
     const [n, e] = this.fromDeck(sp.f, sp.s);
     return { n, e, h: this.deckHeight(sp.f, sp.s), f: sp.f, s: sp.s };
+  }
+
+  // point de poser de la mission : spot du navire ou zone de poser en montagne
+  landing() {
+    if (this.hasShip) { const s = this.spotWorld(), S = this.ship; return { kind: 'deck', name: 'BPC', n: s.n, e: s.e, h: s.h, psi: S.psi, vn: S.vn, ve: S.ve, vu: S.heaveD + s.f * S.pitchD - s.s * S.rollD }; }
+    const z = this.mission.lz; return { kind: 'lz', name: z.name, n: z.n, e: z.e, h: terrainH(z.n, z.e), psi: 0, vn: 0, ve: 0, vu: 0 };
+  }
+  // plan de vol : liste de points { name, n, e } du départ au point de poser
+  plan() {
+    const L = this.landing();
+    if (this.hasShip) {
+      const S = this.ship, [in_, ie] = this.fromDeck(L_SPOT(this.cfg.spot).f - 0.8 * 1852, -6);
+      const k = clamp(-950 / (L.n || -1), 0, 1);
+      return [{ name: 'HÉLI', n: 0, e: 0 }, { name: 'CÔTE', n: -950, e: L.e * k }, { name: 'IP', n: in_, e: ie }, { name: 'BPC', n: L.n, e: L.e, land: true }];
+    }
+    const pts = [{ name: 'PAU', n: 0, e: 0 }];
+    for (const w of this.mission.route) pts.push({ name: w, n: WPT[w][0], e: WPT[w][1] });
+    pts.push({ name: L.name, n: L.n, e: L.e, land: true });
+    return pts;
   }
 
   // ---------- surface sous un point (sol, pont, mer) ----------
@@ -143,7 +224,7 @@ export class Environment {
       return false;
     }
     if (alt > 50) return false;
-    for (const b of BUILDINGS) if (Math.abs(n - b.n) < b.dn / 2 && Math.abs(e - b.e) < b.de / 2 && alt < terrainH(b.n, b.e) + b.h) return true;
+    for (const b of buildings()) if (Math.abs(n - b.n) < b.dn / 2 && Math.abs(e - b.e) < b.de / 2 && alt < terrainH(b.n, b.e) + b.h) return true;
     return false;
   }
 
@@ -151,6 +232,7 @@ export class Environment {
   update(dt, fdm) {
     this.t += dt;
     this.updateShip();
+    if (fdm) this.rho = 1.225 * Math.pow(Math.max(0.3, 1 - 2.2558e-5 * fdm.alt), 4.2559);     // atmosphère standard
     const c = this.cfg, W = c.windKt * KT;
     // rafales lentes (module et direction)
     const tg = 5;
@@ -189,7 +271,16 @@ export class Environment {
     g[0] = ou(g[0], Lh / V, sig); g[1] = ou(g[1], Lh / V, sig); g[2] = ou(g[2], Lv / V, sv);
     const gr = this.gr;
     gr[0] = ou(gr[0], 0.35, sig * 0.10); gr[1] = ou(gr[1], 0.5, sig * 0.035); gr[2] = ou(gr[2], 0.5, sig * 0.04);
-    this.wind[0] = wn + g[0]; this.wind[1] = we + g[1]; this.wind[2] = g[2];
+    // aérologie de relief : le vent suit la pente (ascendance au vent, rabattant sous le vent), s'atténue avec la hauteur
+    let oro = 0;
+    if (fdm && TH === 'pau' && agl < 900) {
+      const pn = fdm.pos[0], pe = fdm.pos[1], d = 120;
+      oro = clamp((wn * (terrainH(pn + d, pe) - terrainH(pn - d, pe)) + we * (terrainH(pn, pe + d) - terrainH(pn, pe - d))) / (2 * d), -7, 7) * Math.exp(-agl / 280);
+    }
+    this.oro = oro;
+    this.wind[0] = wn + g[0]; this.wind[1] = we + g[1]; this.wind[2] = g[2] - oro;
     this.gustM[0] = gr[0]; this.gustM[1] = gr[1]; this.gustM[2] = gr[2];
   }
 }
+
+function L_SPOT(id) { return SHIP.spots.find((x) => x.id === id) || SHIP.spots[4]; }

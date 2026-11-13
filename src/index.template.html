@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Simulateur NH90 — décollage côtier et appontage BPC</title>
+<title>Simulateur NH90</title>
 <style>
   :root { --bg: rgba(10,16,22,.82); --line: #2c3a46; --tx: #e6edf2; --dim: #93a1ad; --acc: #4fd8ff; --ok: #35e06a; --warn: #ffb020; --bad: #ff4a3a; }
   * { box-sizing: border-box; }
@@ -57,7 +57,7 @@
   <div><small>VZ ft/min</small><b id="hVs">0</b></div><div><small>CAP</small><b id="hHdg">000</b></div><div><small>COUPLE</small><b id="hTq">0</b></div>
   <div><small>NR</small><b id="hNr">100</b></div><div><small>AFCS</small><b id="hMode">ATT</b></div><div><small>VUE</small><b id="hView">—</b></div>
 </div>
-<div id="mission" class="panel"><h3>Mission : appontage BPC</h3><ol id="mSteps"></ol><p id="mHint"></p></div>
+<div id="mission" class="panel"><h3 id="mTitle">Mission : appontage BPC</h3><ol id="mSteps"></ol><p id="mHint"></p></div>
 <div id="status" class="panel"></div>
 <div id="alert"></div>
 <div id="ready" class="panel hide"></div>
@@ -68,20 +68,25 @@
 
 <div id="menu">
   <div class="card panel">
-    <h1>Simulateur NH90 — décollage côtier et appontage sur BPC</h1>
+    <h1>Simulateur NH90 — appontage BPC et vol tactique en montagne</h1>
     <p class="sub">Modèle de vol 6 degrés de liberté classe NH90 (10 t) · commandes de vol électriques · vent, turbulence et mouvements de plate-forme paramétrables</p>
 
     <h2>Situation de départ</h2>
     <div class="grid">
-      <label class="row"><span>Position initiale</span><select id="cStart" style="grid-column: span 2">
-        <option value="pad">Hélisurface de l'aérodrome (mission complète)</option>
-        <option value="transit">En transit, 2 NM du navire, 500 ft / 100 kt</option>
-        <option value="final">Finale, 0,5 NM derrière le navire, 250 ft / 60 kt</option>
-        <option value="short">Courte finale, 150 m derrière le spot, 80 ft / 25 kt</option>
-        <option value="deckhover">Stationnaire au-dessus du spot (15 ft)</option>
-        <option value="deck">Posé sur le pont (décollage du navire)</option>
+      <label class="row"><span>Mission</span><select id="cMission" style="grid-column: span 2">
+        <option value="bpc">Marine — décollage côtier et appontage sur BPC</option>
+        <option value="benou">Terre — Pau → plateau du Bénou (877 m), vol tactique en vallée</option>
+        <option value="bious">Terre — Pau → Bious-Artigues (1 406 m), haute montagne</option>
       </select></label>
-      <label class="row"><span>Spot d'appontage</span><select id="cSpot" style="grid-column: span 2"><option>1</option><option>2</option><option>3</option><option>4</option><option selected>5</option><option>6</option></select></label>
+      <label class="row"><span>Position initiale</span><select id="cStart" style="grid-column: span 2">
+        <option value="pad">Hélisurface de départ (mission complète)</option>
+        <option value="transit">En route (à mi-parcours), 500 ft sol / 100 kt</option>
+        <option value="final">Finale, 0,5 NM avant le point de poser, 60 kt</option>
+        <option value="short">Courte finale, 150 m avant le point de poser, 25 kt</option>
+        <option value="deckhover">Stationnaire au-dessus du point de poser (15 ft)</option>
+        <option value="deck">Posé sur le point de poser (décollage du pont / de la zone)</option>
+      </select></label>
+      <label class="row"><span>Spot d'appontage (BPC)</span><select id="cSpot" style="grid-column: span 2"><option>1</option><option>2</option><option>3</option><option>4</option><option selected>5</option><option>6</option></select></label>
       <label class="row"><span>Lois de pilotage (AFCS)</span><select id="cMode" style="grid-column: span 2"><option value="ATT">ATT — tenue d'assiette et de cap (NH90 nominal)</option><option value="SAS">SAS — amortisseur seul</option><option value="DIR">DIRECT — sans stabilisation (difficile)</option></select></label>
       <label class="row"><span>Masse au décollage</span><input type="range" id="cMass" min="8000" max="10600" step="100" value="9800"><output></output></label>
     </div>
@@ -116,7 +121,7 @@
       <li><b>Bouton 3 / M</b> mode AFCS</li><li><b>Bouton 4 / B</b> freins de roues</li>
       <li><b>Souris</b> regarder autour (glisser), molette = zoom</li><li><b>O</b> écrans incrustés · <b style="min-width:0">H</b> bandeau</li>
       <li><b>E</b> panne moteur (1 puis 2)</li><li><b>P / Échap</b> pause et réglages</li>
-      <li><b>R</b> recommencer</li><li><b>N</b> son</li>
+      <li><b>R</b> recommencer · <b style="min-width:0">N</b> son</li><li><b>G</b> échelle de la SITAC</li>
     </ul>
     <div class="foot"><span id="resume" class="hide"><button id="bResume">Reprendre le vol</button></span><button id="bGo" class="go">Voler</button></div>
   </div>
