@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulateur NH90 — décollage côtier et appontage BPC</title>
+<style>
+  :root { --bg: rgba(10,16,22,.82); --line: #2c3a46; --tx: #e6edf2; --dim: #93a1ad; --acc: #4fd8ff; --ok: #35e06a; --warn: #ffb020; --bad: #ff4a3a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1016; color: var(--tx); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  canvas#view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  .panel { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; backdrop-filter: blur(4px); }
+  #hud { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); display: flex; gap: 14px; padding: 6px 14px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #hud div { text-align: center; min-width: 54px; } #hud small { display: block; color: var(--dim); font-size: 10px; letter-spacing: .06em; } #hud b { font-size: 17px; }
+  #mission { position: fixed; top: 8px; left: 8px; width: 300px; padding: 10px 12px; }
+  #mission h3 { margin: 0 0 4px; font-size: 13px; color: var(--acc); letter-spacing: .05em; text-transform: uppercase; }
+  #mission ol { margin: 6px 0 0; padding-left: 20px; color: var(--dim); } #mission li.cur { color: var(--tx); font-weight: 600; } #mission li.done { color: var(--ok); }
+  #mission p { margin: 6px 0 0; color: var(--tx); }
+  #status { position: fixed; top: 8px; right: 8px; padding: 8px 12px; text-align: right; font-size: 12px; color: var(--dim); max-width: 280px; }
+  #status b { color: var(--tx); }
+  #alert { position: fixed; top: 22%; left: 50%; transform: translateX(-50%); font-size: 26px; font-weight: 800; letter-spacing: .08em; text-shadow: 0 2px 8px #000; pointer-events: none; text-align: center; }
+  #ready { position: fixed; top: 76px; left: 50%; transform: translateX(-50%); padding: 14px 22px; text-align: center; font-size: 16px; max-width: 620px; }
+  #ready b { color: var(--acc); }
+  #collbar { position: fixed; left: 10px; bottom: 10px; width: 46px; height: 200px; padding: 4px; }
+  #collbar i { position: absolute; left: 4px; right: 4px; bottom: 4px; background: var(--ok); border-radius: 3px; }
+  #collbar u { position: absolute; left: 0; right: 0; height: 2px; background: var(--warn); }
+  #collbar span { position: absolute; top: -18px; left: 0; right: 0; text-align: center; font-size: 10px; color: var(--dim); }
+  .mfd { position: fixed; bottom: 10px; width: 250px; height: 250px; border: 2px solid #1a2128; border-radius: 6px; background: #000; }
+  #ovPfd { left: 66px; } #ovHov { right: 10px; } #ovNd { right: 270px; }
+  #menu, #debrief { position: fixed; inset: 0; background: rgba(6,10,14,.72); display: flex; align-items: center; justify-content: center; z-index: 10; overflow: auto; }
+  .card { width: min(1020px, 96vw); max-height: 96vh; overflow: auto; padding: 20px 24px; }
+  .card h1 { margin: 0 0 2px; font-size: 22px; } .card h2 { margin: 16px 0 8px; font-size: 13px; color: var(--acc); text-transform: uppercase; letter-spacing: .06em; }
+  .card p.sub { margin: 0; color: var(--dim); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 4px 28px; }
+  label.row { display: grid; grid-template-columns: 1fr 150px 62px; gap: 8px; align-items: center; padding: 3px 0; }
+  label.row output { text-align: right; font-variant-numeric: tabular-nums; color: var(--tx); }
+  input[type=range] { width: 100%; accent-color: var(--acc); }
+  select, button { font: inherit; color: var(--tx); background: #17212b; border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; }
+  button { cursor: pointer; } button:hover { border-color: var(--acc); }
+  button.go { background: #0f6a8c; border-color: #1fa0cf; font-size: 17px; font-weight: 700; padding: 10px 26px; }
+  table { border-collapse: collapse; width: 100%; } td, th { padding: 4px 8px; border-bottom: 1px solid var(--line); text-align: left; font-variant-numeric: tabular-nums; }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  .bar { position: relative; height: 10px; width: 140px; background: #0d141a; border: 1px solid var(--line); border-radius: 3px; }
+  .bar i { position: absolute; top: 0; bottom: 0; width: 4px; margin-left: -2px; background: var(--ok); }
+  .keys { columns: 2; column-gap: 28px; color: var(--dim); margin: 0; padding: 0; list-style: none; } .keys b { color: var(--tx); display: inline-block; min-width: 110px; }
+  .foot { display: flex; gap: 12px; align-items: center; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
+  .hide { display: none !important; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  #score { font-size: 44px; font-weight: 800; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="hud" class="panel">
+  <div><small>IAS kt</small><b id="hIas">0</b></div><div><small>ALT ft</small><b id="hAlt">0</b></div><div><small>RADIO ft</small><b id="hRa">0</b></div>
+  <div><small>VZ ft/min</small><b id="hVs">0</b></div><div><small>CAP</small><b id="hHdg">000</b></div><div><small>COUPLE</small><b id="hTq">0</b></div>
+  <div><small>NR</small><b id="hNr">100</b></div><div><small>AFCS</small><b id="hMode">ATT</b></div><div><small>VUE</small><b id="hView">—</b></div>
+</div>
+<div id="mission" class="panel"><h3>Mission : appontage BPC</h3><ol id="mSteps"></ol><p id="mHint"></p></div>
+<div id="status" class="panel"></div>
+<div id="alert"></div>
+<div id="ready" class="panel hide"></div>
+<div id="collbar" class="panel"><span>COLL</span><i id="collFill"></i><u id="collMark"></u></div>
+<canvas id="ovPfd" class="mfd" width="512" height="512"></canvas>
+<canvas id="ovNd" class="mfd" width="512" height="512"></canvas>
+<canvas id="ovHov" class="mfd" width="512" height="512"></canvas>
+
+<div id="menu">
+  <div class="card panel">
+    <h1>Simulateur NH90 — décollage côtier et appontage sur BPC</h1>
+    <p class="sub">Modèle de vol 6 degrés de liberté classe NH90 (10 t) · commandes de vol électriques · vent, turbulence et mouvements de plate-forme paramétrables</p>
+
+    <h2>Situation de départ</h2>
+    <div class="grid">
+      <label class="row"><span>Position initiale</span><select id="cStart" style="grid-column: span 2">
+        <option value="pad">Hélisurface de l'aérodrome (mission complète)</option>
+        <option value="transit">En transit, 2 NM du navire, 500 ft / 100 kt</option>
+        <option value="final">Finale, 0,5 NM derrière le navire, 250 ft / 60 kt</option>
+        <option value="short">Courte finale, 150 m derrière le spot, 80 ft / 25 kt</option>
+        <option value="deckhover">Stationnaire au-dessus du spot (15 ft)</option>
+        <option value="deck">Posé sur le pont (décollage du navire)</option>
+      </select></label>
+      <label class="row"><span>Spot d'appontage</span><select id="cSpot" style="grid-column: span 2"><option>1</option><option>2</option><option>3</option><option>4</option><option selected>5</option><option>6</option></select></label>
+      <label class="row"><span>Lois de pilotage (AFCS)</span><select id="cMode" style="grid-column: span 2"><option value="ATT">ATT — tenue d'assiette et de cap (NH90 nominal)</option><option value="SAS">SAS — amortisseur seul</option><option value="DIR">DIRECT — sans stabilisation (difficile)</option></select></label>
+      <label class="row"><span>Masse au décollage</span><input type="range" id="cMass" min="8000" max="10600" step="100" value="9800"><output></output></label>
+    </div>
+
+    <h2>Météo et mer</h2>
+    <div class="grid">
+      <label class="row"><span>Direction du vent (d'où il vient)</span><input type="range" id="cWindDir" min="0" max="355" step="5" value="240"><output></output></label>
+      <label class="row"><span>Vent moyen</span><input type="range" id="cWindKt" min="0" max="45" step="1" value="15"><output></output></label>
+      <label class="row"><span>Rafales (amplitude)</span><input type="range" id="cGust" min="0" max="25" step="1" value="5"><output></output></label>
+      <label class="row"><span>Turbulence</span><input type="range" id="cTurb" min="0" max="100" step="5" value="30"><output></output></label>
+      <label class="row"><span>État de la mer (mouvements du pont)</span><input type="range" id="cSea" min="0" max="6" step="1" value="3"><output></output></label>
+      <label class="row"><span>Sillage aérodynamique du navire</span><select id="cWake" style="grid-column: span 2"><option value="1">Actif</option><option value="0">Désactivé</option></select></label>
+      <label class="row"><span>Visibilité</span><input type="range" id="cVis" min="2" max="40" step="1" value="25"><output></output></label>
+      <label class="row"><span>Heure locale</span><input type="range" id="cHour" min="6" max="18.5" step="0.5" value="15"><output></output></label>
+    </div>
+
+    <h2>Navire (BPC)</h2>
+    <div class="grid">
+      <label class="row"><span>Route du navire</span><input type="range" id="cShipHdg" min="0" max="355" step="5" value="245"><output></output></label>
+      <label class="row"><span>Vitesse du navire</span><input type="range" id="cShipKt" min="0" max="20" step="1" value="10"><output></output></label>
+    </div>
+
+    <h2>Joystick <span id="padName" style="color:var(--dim); text-transform:none; letter-spacing:0"></span></h2>
+    <table id="padTable"></table>
+    <p class="sub" id="padHelp" style="margin-top:6px"></p>
+
+    <h2>Commandes</h2>
+    <ul class="keys">
+      <li><b>Manche</b> cyclique (ou flèches)</li><li><b>Torsion</b> palonnier (ou Q / D)</li>
+      <li><b>Manette des gaz</b> collectif (ou Z / S)</li><li><b>Chapeau</b> trim d'assiette (ou I J K L)</li>
+      <li><b>Gâchette / T</b> trim release</li><li><b>Bouton 2 / V</b> changer de vue</li>
+      <li><b>Bouton 3 / M</b> mode AFCS</li><li><b>Bouton 4 / B</b> freins de roues</li>
+      <li><b>Souris</b> regarder autour (glisser), molette = zoom</li><li><b>O</b> écrans incrustés · <b style="min-width:0">H</b> bandeau</li>
+      <li><b>E</b> panne moteur (1 puis 2)</li><li><b>P / Échap</b> pause et réglages</li>
+      <li><b>R</b> recommencer</li><li><b>N</b> son</li>
+    </ul>
+    <div class="foot"><span id="resume" class="hide"><button id="bResume">Reprendre le vol</button></span><button id="bGo" class="go">Voler</button></div>
+  </div>
+</div>
+
+<div id="debrief" class="hide"><div class="card panel" style="width:min(640px,96vw)">
+  <h1 id="dTitle"></h1><p class="sub" id="dSub"></p>
+  <div id="score"></div>
+  <table id="dTable"></table>
+  <div class="foot"><button id="dMenu">Réglages</button><button id="dAgain" class="go">Recommencer</button></div>
+</div></div>
+
+<script>/*BUNDLE*/</script>
+</body>
+</html>

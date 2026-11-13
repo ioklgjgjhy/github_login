@@ -1,0 +1,27 @@
+{
+  "name": "simu-nh90",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node test/fdm.test.mjs",
+    "serve": "python3 lancer.py"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ioklgjgjhy/github_login.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/ioklgjgjhy/github_login/issues"
+  },
+  "homepage": "https://github.com/ioklgjgjhy/github_login#readme",
+  "dependencies": {
+    "esbuild": "^0.28.2",
+    "three": "^0.160.0"
+  },
+  "type": "module"
+}

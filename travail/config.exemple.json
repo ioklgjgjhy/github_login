@@ -1,0 +1,14 @@
+{
+  "_aide": "Copiez ce fichier en config.json dans ce dossier, puis lancez le simulateur avec lancer.py.",
+  "modele": {
+    "fichier": "nh90.glb",
+    "longueur": 16.1,
+    "rotationY": 0,
+    "dx": 0, "dy": 0.4, "dz": 1.6,
+    "rotorsInclus": false
+  },
+  "environnement": {
+    "windDir": 240, "windKt": 15, "gustKt": 5, "turb": 0.3,
+    "seaState": 3, "shipHdg": 245, "shipKt": 10, "shipN": -4300, "shipE": 2600
+  }
+}
